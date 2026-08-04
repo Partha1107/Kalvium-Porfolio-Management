@@ -1,24 +1,9 @@
 import { NavLink } from "react-router-dom";
-import { useState, useEffect } from "react";
 import "./Navbar.css";
+import { ArrowRight } from "lucide-react";
 import logo from "../assets/kalvium-logo.svg";
 
 function Navbar() {
-    const [isLoggedIn, setIsLoggedIn] = useState(
-        !!localStorage.getItem("token")
-    );
-
-    useEffect(() => {
-        const updateAuth = () => {
-            setIsLoggedIn(!!localStorage.getItem("token"));
-        };
-
-        window.addEventListener("authChanged", updateAuth);
-
-        return () => {
-            window.removeEventListener("authChanged", updateAuth);
-        };
-    }, []);
 
     return (
         <header className="header">
@@ -31,17 +16,11 @@ function Navbar() {
 
             <nav>
                 <ul>
-                    <li><NavLink to="/">Home</NavLink></li>
-                    <li><NavLink to="/students">Students</NavLink></li>
-                    <li><NavLink to="/about">About</NavLink></li>
+                    <li className="nav-btn"><NavLink to="/">Home</NavLink></li>
+                    <li className="nav-btn"><NavLink to="/students">Students</NavLink></li>
+                    <li className="nav-btn"><NavLink to="/about">About</NavLink></li>
 
-                    <li className="login-btn">
-                        {isLoggedIn ? (
-                            <NavLink to="/dashboard">Dashboard</NavLink>
-                        ) : (
-                            <NavLink to="/login">Login</NavLink>
-                        )}
-                    </li>
+                    <li className="btn-log"><NavLink to="/login">Login <ArrowRight className="w-3.5 h-3.5"/></NavLink></li>
                 </ul>
             </nav>
         </header>

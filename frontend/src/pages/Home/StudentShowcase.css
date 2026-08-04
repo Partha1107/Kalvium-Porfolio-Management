@@ -1,0 +1,119 @@
+.student-showcase {
+    position: relative;
+    width: 100%;
+    font-family: "Inter", sans-serif;
+    background: #ffffff;
+    padding: 0 28px;
+}
+
+.student-showcase__container {
+    max-width: 1144px;
+    margin: 0 auto 56px;
+}
+
+.student-showcase__eyebrow {
+    margin: 0 0 8px;
+    color: #e8342a;
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    font-weight: 700;
+    text-align: center;
+}
+
+.student-showcase h2 {
+    margin: 0 0 18px;
+    color: #111827;
+    font-size: 30px;
+    letter-spacing: -0.02em;
+    text-align: center;
+}
+
+.student-showcase__steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.student-showcase__step article {
+    border: 1px solid #ececec;
+    border-radius: 18px;
+    background: #ffffff;
+    box-shadow: 0 8px 20px rgba(17, 24, 39, 0.05);
+    padding: 18px 14px;
+    text-align: center;
+    height: 100%;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.student-showcase__step article:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 12px 24px rgba(17, 24, 39, 0.08);
+}
+
+.student-showcase__icon-wrap {
+    position: relative;
+    width: 58px;
+    height: 58px;
+    margin: 0 auto 12px;
+}
+
+.student-showcase__icon {
+    width: 58px;
+    height: 58px;
+    border-radius: 50%;
+    border: 1px solid #ececec;
+    background: #ffffff;
+    color: #e8342a;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 21px;
+}
+
+.student-showcase__count {
+    position: absolute;
+    top: -4px;
+    right: -6px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #e8342a;
+    color: #ffffff;
+    font-size: 11px;
+    font-weight: 700;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.student-showcase h3 {
+    margin: 0 0 6px;
+    color: #111827;
+    font-size: 17px;
+}
+
+.student-showcase__step p {
+    margin: 0;
+    color: #6b7280;
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+@media (max-width: 1040px) {
+    .student-showcase__steps {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 720px) {
+    .student-showcase {
+        padding: 0 16px;
+    }
+    .student-showcase__steps {
+        grid-template-columns: 1fr;
+    }
+}

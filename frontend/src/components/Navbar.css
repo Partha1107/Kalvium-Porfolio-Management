@@ -8,7 +8,7 @@
 
 .header{
     display: flex;
-    background-color: rgb(0, 0, 0);
+    background-color: rgb(10, 10, 10);
     justify-content: space-between;
     align-items: center;
     position: sticky;
@@ -16,14 +16,16 @@
     z-index: 1000;
     text-align: center;
     font-family: 'Inter', sans-serif;
+    color:rgb(82, 82, 82);
     width: 100%;
+    height: 60px;
 }
 
 .logo-container{
     display: flex;
     text-align: center;
     gap: 12px;
-    padding: 2px;
+    padding: 1px;
 }
 
 @media (max-width: 768px) {
@@ -90,23 +92,43 @@ nav ul li a::after {
     transition: transform 0.3s ease;
 }
 
-nav ul li a:hover::after,
-nav ul li a.active::after {
+nav ul .nav-btn a:hover::after,
+nav ul .nav-btn a.active::after {
     transform: scaleX(1);
 }
 
-nav ul li a:hover,
-nav ul li a.active {
+nav ul .nav-btn a:hover,
+nav ul .nav-btn a.active {
     color: #ff3b3b;
 }
 
-.login-btn{
-    background-color: red;
-    padding: 10px;
-    border-radius: 10px;
-    transition: 0.3s;
+.btn-log{
+    list-style: none;
 }
 
-.login-btn:hover{
-    color: black !important;
+/* make the login link a pill-style CTA similar to the dashboard button */
+nav ul .btn-log a{
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background-color: #ff3b3b;
+    color: #fff;
+    border-radius: 10px;
+    font-weight: 600;
+    text-decoration: none;
+    box-shadow: 0 6px 18px rgba(17,24,39,0.06);
+    transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+nav ul .btn-log a:hover,
+nav ul .btn-log a:focus{
+    transform: translateY(-1px);
+    background-color: #ff1f1f;
+    box-shadow: 0 12px 30px rgba(232,52,42,0.12);
+}
+
+ArrowRight{
+    width: 1px;
+    height: 1px;
 }
