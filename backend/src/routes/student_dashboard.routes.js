@@ -3,9 +3,12 @@ import rateLimit from "express-rate-limit";
 import { createAuthedSupabaseClient, supabase } from "../config/supabase.js";
 
 const router = express.Router();
+
+// --- Rate Limiters Config ---
 const STATS_RATE_LIMIT_WINDOW_MS = 60 * 1000;
 const STATS_RATE_LIMIT_MAX_REQUESTS = 30;
 const AUTH_ROUTE_RATE_LIMIT_MAX_REQUESTS = 120;
+
 const authRouteLimiter = rateLimit({
     windowMs: STATS_RATE_LIMIT_WINDOW_MS,
     max: AUTH_ROUTE_RATE_LIMIT_MAX_REQUESTS,
@@ -22,10 +25,23 @@ const statsRouteLimiter = rateLimit({
     message: { error: "Too many stats requests. Please try again later." },
 });
 
+// --- Validation Helpers ---
 const isValidGitHubUsername = (username) => /^[a-zA-Z0-9-]{1,39}$/.test(username);
 const isValidLeetCodeUsername = (username) => /^[a-zA-Z0-9_-]{1,30}$/.test(username);
 
-router.get("/profile", authRouteLimiter, async (req, res) => {
+const extractUsername = (url, platform) => {
+    if (!url) return null;
+    try {
+        if (platform === "github") return url.match(/github\.com\/([^/]+)/)?.[1] || null;
+        if (platform === "leetcode") return url.match(/leetcode\.com\/(?:u\/)?([^/]+)/)?.[1] || null;
+    } catch (e) {
+        return null;
+    }
+    return null;
+};
+
+// --- Authentication Middleware ---
+const requireAuth = async (req, res, next) => {
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -33,8 +49,6 @@ router.get("/profile", authRouteLimiter, async (req, res) => {
         }
 
         const token = authHeader.split(" ")[1];
-        const authedSupabase = createAuthedSupabaseClient(token);
-
         const { data: { user }, error: authError } = await supabase.auth.getUser(token);
 
         if (authError || !user) {
@@ -42,11 +56,22 @@ router.get("/profile", authRouteLimiter, async (req, res) => {
         }
 
         req.user = user;
+        req.authedSupabase = createAuthedSupabaseClient(token);
+        next();
+    } catch (err) {
+        return res.status(500).json({ error: "Authentication check failed: " + err.message });
+    }
+};
 
-        const { data, error } = await authedSupabase
+// ==========================================
+// 1. GET Student Profile
+// ==========================================
+router.get("/profile", authRouteLimiter, requireAuth, async (req, res) => {
+    try {
+        const { data, error } = await req.authedSupabase
             .from("profiles")
             .select("*")
-            .eq("user_id", user.id)
+            .eq("user_id", req.user.id)
             .maybeSingle();
 
         if (error) throw error;
@@ -61,38 +86,28 @@ router.get("/profile", authRouteLimiter, async (req, res) => {
     }
 });
 
-router.put("/updateprofile", authRouteLimiter, async (req, res) => {
+// ==========================================
+// 2. PUT / UPDATE Student Profile
+// ==========================================
+router.put("/updateprofile", authRouteLimiter, requireAuth, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ error: "Missing or invalid Authorization header" });
-        }
-
-        const token = authHeader.split(" ")[1];
-        const authedSupabase = createAuthedSupabaseClient(token);
-
-        const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-        if (authError || !user) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
         const updatePayload = req.body;
         if (!updatePayload || Object.keys(updatePayload).length === 0) {
             return res.status(400).json({ error: "No profile data provided to update." });
         }
 
-        const { 
-            id, 
-            auth_id, 
-            user_id, 
-            display_id, 
+        const {
+            id,
+            auth_id,
+            user_id,
+            display_id,
             name,
-            kalvium_email, 
-            kalviumEmail, 
-            squadId, 
-            personalEmail, 
-            resumeUrl, 
-            ...restPayload 
+            kalvium_email,
+            kalviumEmail,
+            squadId,
+            personalEmail,
+            resumeUrl,
+            ...restPayload
         } = updatePayload;
 
         const rawSquad = squadId !== undefined ? squadId : restPayload.squad_id;
@@ -100,21 +115,29 @@ router.put("/updateprofile", authRouteLimiter, async (req, res) => {
 
         const cleanPayload = {
             ...restPayload,
-            user_id: user.id, 
+            user_id: req.user.id,
             squad_id: Number.isNaN(parsedSquad) ? null : parsedSquad,
             personal_email: personalEmail !== undefined ? personalEmail : restPayload.personal_email || null,
             resume_url: resumeUrl !== undefined ? resumeUrl : restPayload.resume_url || null,
         };
 
-        let { data, error: dbError } = await authedSupabase
+        // If 'name' and 'kalvium_email' exist in your database table, re-attach them here:
+        if (name !== undefined) cleanPayload.name = name;
+        if (kalvium_email !== undefined || kalviumEmail !== undefined) {
+            cleanPayload.kalvium_email = kalvium_email || kalviumEmail || null;
+        }
+
+        // Attempt update first
+        let { data, error: dbError } = await req.authedSupabase
             .from("profiles")
             .update(cleanPayload)
-            .eq("user_id", user.id)
+            .eq("user_id", req.user.id)
             .select()
             .maybeSingle();
 
+        // Fallback to insert if record doesn't exist yet
         if (!data && !dbError) {
-            const insertResult = await authedSupabase
+            const insertResult = await req.authedSupabase
                 .from("profiles")
                 .insert([cleanPayload])
                 .select()
@@ -140,33 +163,13 @@ router.put("/updateprofile", authRouteLimiter, async (req, res) => {
     }
 });
 
-const extractUsername = (url, platform) => {
-    if (!url) return null;
-    try {
-        if (platform === "github") return url.match(/github\.com\/([^/]+)/)?.[1] || null;
-        if (platform === "leetcode") return url.match(/leetcode\.com\/(?:u\/)?([^/]+)/)?.[1] || null;
-    } catch (e) {
-        return null;
-    }
-    return null;
-};
-
-// Fetch GitHub Stats
-router.post("/github", statsRouteLimiter, async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing or invalid Authorization header" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !user) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-    }
-
+// ==========================================
+// 3. POST GitHub Profile Stats
+// ==========================================
+router.post("/github", statsRouteLimiter, requireAuth, async (req, res) => {
     const { url } = req.body;
     const username = extractUsername(url, "github");
-    
+
     if (!username || !isValidGitHubUsername(username)) {
         return res.status(400).json({ error: "Invalid GitHub URL" });
     }
@@ -196,19 +199,10 @@ router.post("/github", statsRouteLimiter, async (req, res) => {
     }
 });
 
-// Fetch LeetCode Stats (Directly from LeetCode Official GraphQL API)
-router.post("/leetcode", statsRouteLimiter, async (req, res) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-        return res.status(401).json({ error: "Missing or invalid Authorization header" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token);
-    if (authError || !user) {
-        return res.status(401).json({ error: "Invalid or expired token" });
-    }
-
+// ==========================================
+// 4. POST LeetCode Profile Stats (Official GraphQL API)
+// ==========================================
+router.post("/leetcode", statsRouteLimiter, requireAuth, async (req, res) => {
     const { url } = req.body;
     const username = extractUsername(url, "leetcode");
 
@@ -231,6 +225,11 @@ router.post("/leetcode", statsRouteLimiter, async (req, res) => {
                         ranking
                         reputation
                     }
+                }
+                recentSubmissionList(username: $username, limit: 3) {
+                    title
+                    timestamp
+                    statusDisplay
                 }
             }
         `;
@@ -266,6 +265,29 @@ router.post("/leetcode", statsRouteLimiter, async (req, res) => {
         const mediumSolved = submitStats.find(s => s.difficulty === "Medium")?.count || 0;
         const hardSolved = submitStats.find(s => s.difficulty === "Hard")?.count || 0;
 
+        // Process recent submission list and format timestamp to human-readable date
+        const recentSubmissionsRaw = result.data.recentSubmissionList || [];
+        const recentSubmissions = recentSubmissionsRaw.map((sub) => {
+            let formattedDate = "Recently";
+            if (sub.timestamp) {
+                const dateObj = new Date(parseInt(sub.timestamp) * 1000);
+                formattedDate = dateObj.toLocaleString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                    year: "numeric",
+                    hour: "2-digit",
+                    minute: "2-digit"
+                });
+            }
+
+            return {
+                title: sub.title,
+                statusDisplay: sub.statusDisplay,
+                timestamp: sub.timestamp,
+                timeAgo: formattedDate
+            };
+        });
+
         return res.status(200).json({
             username: user.username,
             totalSolved,
@@ -273,8 +295,8 @@ router.post("/leetcode", statsRouteLimiter, async (req, res) => {
             mediumSolved,
             hardSolved,
             ranking: user.profile?.ranking || "N/A",
-            acceptanceRate: 0,
-            currentlyAttempting: totalSolved > 0 ? "Active in Problem Solving" : "Not started"
+            recentSubmissions, // <--- Sends recent activity list to frontend
+            lastActive: recentSubmissions.length > 0 ? recentSubmissions[0].timeAgo : "No recent activity"
         });
 
     } catch (err) {

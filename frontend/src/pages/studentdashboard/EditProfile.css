@@ -644,6 +644,12 @@ html, body {
   flex-shrink: 0;
 }
 
+.pm-field-help {
+  font-size: 12px;
+  color: var(--pm-text-faint);
+  line-height: 1.2;
+}
+
 .pm-link-preview {
   color: var(--pm-red);
   text-decoration: none;

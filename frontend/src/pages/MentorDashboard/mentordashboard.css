@@ -2,119 +2,194 @@
 
 /* Global Reset & Base */
 html, body {
-    margin: 0;
-    padding: 0;
-    width: 100%;
-    overflow-x: hidden;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  overflow-x: hidden;
 }
 
-/* Main Layout */
+/* Main Layout Wrapper */
 .mentor-dashboard,
 .mentor-dashboard * {
-    box-sizing: border-box;
+  box-sizing: border-box;
 }
 
 .mentor-dashboard {
-    display: flex;
-    align-items: flex-start;
-    min-height: 100dvh;
-    width: 100%;
-    background: #f8fafc;
-    color: #0f172a;
-    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  display: flex;
+  align-items: flex-start;
+  min-height: 100dvh;
+  width: 100%;
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
 }
 
-/* If using the pm-sidebar (fixed), offset the main content to avoid overlap */
+/* Dynamic Sidebar Margin Offsets with Smooth Transition */
+.dashboard-main {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  transition: margin-left 0.2s ease-in-out, width 0.2s ease-in-out;
+}
+
 .mentor-dashboard > .pm-sidebar + .dashboard-main,
 .mentor-dashboard > aside.pm-sidebar + .dashboard-main {
-    margin-left: 240px;
-    width: calc(100% - 240px);
+  margin-left: 240px;
+  width: calc(100% - 240px);
 }
 
 .mentor-dashboard > .pm-sidebar.is-collapsed + .dashboard-main,
 .mentor-dashboard > aside.pm-sidebar.is-collapsed + .dashboard-main {
-    margin-left: 72px;
-    width: calc(100% - 72px);
+  margin-left: 72px;
+  width: calc(100% - 72px);
 }
 
-/* Right Side / Main Content */
-.dashboard-main {
-    flex: 1;
-    min-width: 0; /* Prevents flex items from overflowing horizontally */
-    width: 100%;
-    display: flex;
-    flex-direction: column;
+/* ===========================
+   PERSISTENT STICKY TOP BAR
+=========================== */
+
+.pm-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 18px 40px;
+  background: rgba(248, 250, 252, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+  transition: padding 0.2s ease;
 }
 
-/* Bottom Section */
+.pm-welcome {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pm-wave {
+  font-size: 20px;
+  line-height: 1;
+  display: inline-block;
+}
+
+.pm-welcome-sub {
+  display: block;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.pm-welcome-name {
+  display: block;
+  margin-top: 2px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  line-height: 1.2;
+}
+
+.pm-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.pm-home-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+}
+
+.pm-home-btn:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+  color: #0f172a;
+}
+
+/* Dashboard Inner Layout Body */
+.dashboard-body {
+  width: 100%;
+  min-width: 0;
+}
+
+/* Students Layout Section */
 .students-layout {
-    display: flex;
-    gap: 24px;
-    padding: 0 40px 48px;
-    align-items: flex-start;
-    width: 100%;
-    min-width: 0;
+  display: flex;
+  gap: 24px;
+  padding: 24px 40px 48px;
+  align-items: flex-start;
+  width: 100%;
+  min-width: 0;
 }
 
 .students-left {
-    flex: 2;
-    min-width: 0; /* Enables text truncation and inner table auto-scrolling */
-    width: 100%;
+  flex: 2;
+  min-width: 0;
+  width: 100%;
 }
 
 .students-right {
-    width: 280px;
-    flex-shrink: 0;
+  width: 280px;
+  flex-shrink: 0;
 }
 
 /* Responsive: Tablet / Narrow Desktop */
 @media (max-width: 1100px) {
-    .students-layout {
-        flex-direction: column;
-        gap: 32px;
-    }
+  .students-layout {
+    flex-direction: column;
+    gap: 32px;
+  }
 
-    .students-left,
-    .students-right {
-        width: 100%;
-    }
+  .students-left,
+  .students-right {
+    width: 100%;
+  }
 }
 
 /* Responsive: Mobile */
 @media (max-width: 768px) {
-    .mentor-dashboard {
-        flex-direction: column;
-        align-items: stretch; /* Stretches sidebar and main content to 100% width */
-    }
+  .mentor-dashboard {
+    flex-direction: column;
+    align-items: stretch;
+  }
 
-    /* Target the sidebar if it's the direct first child of .mentor-dashboard */
-    .mentor-dashboard > *:not(.dashboard-main) {
-        width: 100%;
-    }
+  .mentor-dashboard > .pm-sidebar + .dashboard-main,
+  .mentor-dashboard > aside.pm-sidebar + .dashboard-main,
+  .mentor-dashboard > .pm-sidebar.is-collapsed + .dashboard-main,
+  .mentor-dashboard > aside.pm-sidebar.is-collapsed + .dashboard-main {
+    margin-left: 0;
+    width: 100%;
+  }
 
-    .dashboard-main {
-        width: 100%;
-        overflow-x: hidden; /* Prevents horizontal page bounce while allowing vertical scrolling */
-        overflow-y: visible;
-    }
+  .dashboard-main {
+    width: 100%;
+    overflow-x: hidden;
+    overflow-y: visible;
+  }
 
-    .students-layout {
-        padding: 0 16px 32px;
-        gap: 24px;
-    }
+  .pm-topbar {
+    padding: 16px;
+  }
 
-    .topbar,
-    .dashboard-section {
-        padding-left: 16px;
-        padding-right: 16px;
-    }
-
-    .dashboard-section h1 {
-        font-size: 24px; /* Scaled down for mobile viewports */
-    }
-
-    .stats-card {
-        width: 100%;
-        max-width: 100%; /* Allows full width on small screens */
-    }
+  .students-layout {
+    padding: 16px 16px 32px;
+    gap: 24px;
+  }
 }

@@ -1,6 +1,5 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { createClient } from "@supabase/supabase-js";
 import {
   LayoutDashboard,
   User,
@@ -27,18 +26,12 @@ import {
   Sparkles
 } from "lucide-react";
 
+import { supabase } from "../../lib/supabase.js";
 import kalviumLogo from "../../assets/kalvium-logo.svg";
 import "./EditProfile.css";
 
 import DashboardTab from "./DashboardTab.jsx";
 import { getProfile, updateProfile } from "../../api/routes/StudentDashboard/profile.js";
-
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error("Missing Supabase env vars: VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY");
-}
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 const NAV_ITEMS = [
   { label: "Dashboard", icon: LayoutDashboard },
@@ -119,25 +112,33 @@ export default function ProfileTab({
           console.error("Supabase Auth error:", authError.message);
         }
 
+        const authEmail = user?.email || "";
+        const authName =
+          user?.user_metadata?.full_name ||
+          user?.user_metadata?.name ||
+          user?.user_metadata?.display_name ||
+          (authEmail ? authEmail.split("@")[0] : "Student");
+        const authUserId = user?.id || "N/A";
+
         let apiData = {};
         if (profileData && Object.keys(profileData).length > 0) {
           apiData = profileData;
         } else {
-          const res = await getProfile();
-          if (res) apiData = res.data || res;
+          try {
+            const res = await getProfile();
+            if (res) apiData = res.data || res;
+          } catch (apiErr) {
+            console.warn("Backend profile fetch error:", apiErr.message);
+          }
         }
-
-        const userEmail = user?.email || apiData?.kalvium_email || apiData?.kalviumEmail || "";
-        const userName = apiData?.name || user?.user_metadata?.full_name || user?.user_metadata?.name || "Student";
-        const authUserId = user?.id || apiData?.auth_id || apiData?.user_id || apiData?.id || "N/A";
 
         const mergedProfile = {
           ...apiData,
           auth_id: authUserId,
           display_id: authUserId,
-          name: userName,
-          kalvium_email: userEmail,
-          kalviumEmail: userEmail,
+          name: authName,
+          kalvium_email: authEmail,
+          kalviumEmail: authEmail,
           squad_id: apiData?.squad_id ?? apiData?.squadId ?? "",
           squadId: apiData?.squad_id ?? apiData?.squadId ?? "",
         };
@@ -203,7 +204,8 @@ export default function ProfileTab({
       { key: "resume_url", label: "Resume URL" },
       { key: "github", label: "GitHub Profile" },
       { key: "linkedin", label: "LinkedIn Profile" },
-      { key: "leetcode", label: "LeetCode Profile" }
+      { key: "leetcode", label: "LeetCode Profile" },
+      { key: "codechef", label: "CodeChef Profile" }
     ];
 
     for (const field of urlFields) {
@@ -217,26 +219,27 @@ export default function ProfileTab({
     setIsSaving(true);
 
     try {
-      // 1. Destructure out non-updatable fields & camelCase duplicates
       const {
         id,
         auth_id,
         display_id,
-        name,            // Read-only field
-        kalvium_email,   // Read-only field
-        kalviumEmail,   // Read-only field
-        squadId,         // Duplicate camelCase key
-        personalEmail,   // Duplicate camelCase key
-        resumeUrl,       // Duplicate camelCase key
+        kalviumEmail,
+        squadId,
+        personalEmail,
+        resumeUrl,
         ...restPayload
       } = profile;
 
-      // 2. Build explicit snake_case payload for Supabase database
       const rawSquad = profile?.squad_id ?? profile?.squadId;
       const parsedSquad = rawSquad !== "" && rawSquad !== null && rawSquad !== undefined ? parseInt(rawSquad, 10) : null;
+      const kalviumEmailValue = profile?.kalvium_email || profile?.kalviumEmail || null;
+      const nameValue = profile?.name || null;
 
+      // Construct payload explicitly including name and kalvium_email
       const updatePayload = {
         ...restPayload,
+        name: nameValue,
+        kalvium_email: kalviumEmailValue,
         squad_id: Number.isNaN(parsedSquad) ? null : parsedSquad,
         personal_email: profile?.personal_email || profile?.personalEmail || null,
         resume_url: profile?.resume_url || profile?.resumeUrl || null,
@@ -248,9 +251,13 @@ export default function ProfileTab({
         const updatedData = response.data || response;
         showToast("Profile saved successfully!", "success");
 
+        // Merge API response while guaranteeing name/email aren't wiped by response nulls
         const mergedUpdatedProfile = {
           ...profile,
           ...(typeof updatedData === "object" ? updatedData : updatePayload),
+          name: nameValue,
+          kalvium_email: kalviumEmailValue,
+          kalviumEmail: kalviumEmailValue,
           auth_id: profile.auth_id || profile.display_id,
           display_id: profile.auth_id || profile.display_id,
           squad_id: profile.squad_id ?? profile.squadId,
@@ -489,7 +496,7 @@ export default function ProfileTab({
                         disabled
                       />
                       <Field
-                        label="Kalvium Email (Supabase Auth)"
+                        label="Kalvium Email"
                         value={getProp("kalvium_email", "kalviumEmail")}
                         placeholder="e.g. student@kalvium.community"
                         disabled
@@ -590,6 +597,16 @@ export default function ProfileTab({
                         placeholder="https://leetcode.com/..."
                         leftIcon={<Link2 size={14} />}
                       />
+
+                      <Field
+                        label="CodeChef Profile"
+                        type="url"
+                        pattern="https?://.*"
+                        value={getProp("codechef", "codechef")}
+                        onChange={(e) => handleProfileChange("codechef", e.target.value)}
+                        placeholder="https://www.codechef.com/users/..."
+                        leftIcon={<Code2 size={14} />}
+                      />
                     </div>
                   )}
                 </FormSection>
@@ -656,7 +673,8 @@ function Field({
   placeholder = "",
   type = "text",
   inputMode,
-  pattern
+  pattern,
+  helperText = ""
 }) {
   return (
     <div className="pm-field">
@@ -678,6 +696,7 @@ function Field({
           className={leftIcon ? "has-icon" : ""}
         />
       </div>
+      {helperText && <span className="pm-field-help">{helperText}</span>}
     </div>
   );
 }

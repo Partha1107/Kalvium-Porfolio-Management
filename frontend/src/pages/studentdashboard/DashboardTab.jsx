@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import {
   FileText,
   Eye,
@@ -17,41 +17,17 @@ import {
 import { getGitHubStats, getLeetCodeStats } from "../../api/routes/StudentDashboard/dashboard";
 import "./DashboardTab.css";
 
-export default function DashboardTab({ profile, fileName, isLoading }) {
+// ----------------------------------------------------------------------
+// Custom Hook: Fetch and manage external coding stats
+// ----------------------------------------------------------------------
+function useDashboardStats(githubUrl, leetcodeUrl, profile) {
   const [githubData, setGithubData] = useState(null);
   const [leetcodeData, setLeetcodeData] = useState(null);
   const [isStatsLoading, setIsStatsLoading] = useState(false);
-  const getSafeExternalUrl = (url) => {
-    if (!url) return null;
-    try {
-      const parsedUrl = new URL(url);
-      if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
-        return parsedUrl.toString();
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  };
-
-  const resumeUrl = getSafeExternalUrl(profile?.resumeUrl || profile?.resume_url);
-  const githubUrl = getSafeExternalUrl(profile?.github);
-  const linkedinUrl = getSafeExternalUrl(profile?.linkedin);
-  const leetcodeUrl = getSafeExternalUrl(profile?.leetcode);
-
-  // Parse LinkedIn Handle locally without calling backend
-  const getLinkedinUsername = (url) => {
-    if (!url) return null;
-    try {
-      const match = url.match(/linkedin\.com\/in\/([^/]+)/);
-      return match ? match[1] : "profile";
-    } catch {
-      return "profile";
-    }
-  };
 
   useEffect(() => {
     if (!profile) return;
+    let isMounted = true;
 
     async function loadStats() {
       setIsStatsLoading(true);
@@ -60,25 +36,104 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
           githubUrl ? getGitHubStats(githubUrl) : null,
           leetcodeUrl ? getLeetCodeStats(leetcodeUrl) : null
         ]);
-        
-        if (ghStats) setGithubData(ghStats);
-        if (lcStats) setLeetcodeData(lcStats);
 
+        if (isMounted) {
+          if (ghStats) setGithubData(ghStats);
+          if (lcStats) setLeetcodeData(lcStats);
+        }
       } catch (err) {
         console.error("Error loading dashboard stats from backend:", err);
       } finally {
-        setIsStatsLoading(false);
+        if (isMounted) setIsStatsLoading(false);
       }
     }
 
     loadStats();
+
+    return () => {
+      isMounted = false; // Prevent updating state if component unmounts
+    };
   }, [githubUrl, leetcodeUrl, profile]);
+
+  return { githubData, leetcodeData, isStatsLoading };
+}
+
+// ----------------------------------------------------------------------
+// Main Component
+// ----------------------------------------------------------------------
+export default function DashboardTab({ profile, fileName, isLoading }) {
+  // Hook: Parse and memoize external links & handles
+  const {
+    resumeUrl,
+    githubUrl,
+    linkedinUrl,
+    leetcodeUrl,
+    codechefUrl,
+    linkedinUsername,
+    codechefUsername
+  } = useMemo(() => {
+    const getSafeExternalUrl = (url) => {
+      if (!url) return null;
+      try {
+        const parsedUrl = new URL(url);
+        if (parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:") {
+          return parsedUrl.toString();
+        }
+        return null;
+      } catch {
+        return null;
+      }
+    };
+
+    const getLinkedinUsername = (url) => {
+      if (!url) return null;
+      try {
+        const match = url.match(/linkedin\.com\/in\/([^/]+)/);
+        return match ? match[1] : "profile";
+      } catch {
+        return "profile";
+      }
+    };
+
+    const getCodeChefUsername = (url) => {
+      if (!url) return null;
+      try {
+        const match = url.match(/codechef\.com\/(?:users|profile)\/([^/?#]+)/i);
+        return match ? match[1] : "profile";
+      } catch {
+        return "profile";
+      }
+    };
+
+    const gh = getSafeExternalUrl(profile?.github);
+    const li = getSafeExternalUrl(profile?.linkedin);
+    const lc = getSafeExternalUrl(profile?.leetcode);
+    const cc = getSafeExternalUrl(profile?.codechef || profile?.codechefUrl || profile?.codechef_url);
+    const res = getSafeExternalUrl(profile?.resumeUrl || profile?.resume_url);
+
+    return {
+      resumeUrl: res,
+      githubUrl: gh,
+      linkedinUrl: li,
+      leetcodeUrl: lc,
+      codechefUrl: cc,
+      linkedinUsername: getLinkedinUsername(li),
+      codechefUsername: getCodeChefUsername(cc)
+    };
+  }, [profile]);
+
+  // Hook: Fetch GitHub & LeetCode stats
+  const { githubData, leetcodeData, isStatsLoading } = useDashboardStats(
+    githubUrl,
+    leetcodeUrl,
+    profile
+  );
 
   if (isLoading) {
     return (
       <div className="dt-container">
-        <div className="pm-grid-3">
-          {[1, 2, 3].map((i) => (
+        <div className="dt-social-grid">
+          {[1, 2, 3, 4].map((i) => (
             <div key={i} className="pm-profile-card dt-card">
               <div className="skeleton skeleton-text width-40 mb-12" style={{ height: "20px" }}></div>
               <div className="skeleton skeleton-text width-100 mb-16" style={{ height: "16px" }}></div>
@@ -93,7 +148,7 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
   return (
     <div className="dt-container">
       {/* Overview Cards Row */}
-      <div className="pm-grid-3">
+      <div className="dt-social-grid">
         
         {/* GitHub Card */}
         <div className="pm-profile-card dt-card">
@@ -152,6 +207,48 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
           )}
         </div>
 
+        {/* CodeChef Card */}
+        <div className="pm-profile-card dt-card">
+          <div className="dt-card-header">
+            <div className="dt-icon-wrapper codechef-icon">
+              <Code2 size={20} />
+            </div>
+            <h3 className="dt-card-title">CodeChef</h3>
+          </div>
+
+          {codechefUrl ? (
+            <div className="dt-card-body">
+              <div className="dt-stats-list">
+                <div className="dt-stat-item">
+                  <span className="dt-stat-left">Username</span>
+                  <span className="dt-stat-right truncate-text" title={codechefUsername}>
+                    @{codechefUsername}
+                  </span>
+                </div>
+                <div className="dt-stat-item">
+                  <span className="dt-stat-left">Profile</span>
+                  <span className="dt-stat-right truncate-text" title={codechefUrl}>
+                    Linked
+                  </span>
+                </div>
+              </div>
+              <a
+                href={codechefUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="dt-action-btn codechef-btn"
+              >
+                <span>View CodeChef</span>
+                <ExternalLink size={14} />
+              </a>
+            </div>
+          ) : (
+            <div className="dt-card-body">
+              <p className="dt-fallback-text">Not set</p>
+            </div>
+          )}
+        </div>
+
         {/* LinkedIn Card */}
         <div className="pm-profile-card dt-card">
           <div className="dt-card-header">
@@ -166,15 +263,20 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
               <div className="dt-stats-list">
                 <div className="dt-stat-item">
                   <span className="dt-stat-left">Username</span>
-                  <span className="dt-stat-right">@{getLinkedinUsername(linkedinUrl)}</span>
+                  <span className="dt-stat-right">@{linkedinUsername}</span>
+                </div>
+                <div className="dt-stat-item">
+                  <span className="dt-stat-left">Profile</span>
+                  <span className="dt-stat-right truncate-text" title={linkedinUrl}>
+                    Linked
+                  </span>
                 </div>
               </div>
               <a 
-              href={linkedinUrl} 
+                href={linkedinUrl} 
                 target="_blank" 
                 rel="noopener noreferrer" 
                 className="dt-action-btn linkedin-btn"
-                // style={{ marginTop: "16px" }}
               >
                 <span>View LinkedIn</span>
                 <ExternalLink size={14} />
@@ -182,7 +284,7 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
             </div>
           ) : (
             <div className="dt-card-body">
-              <p className="dt-fallback-text">Not linked yet</p>
+              <p className="dt-fallback-text">Not set</p>
             </div>
           )}
         </div>
@@ -239,7 +341,7 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
             </div>
           ) : (
             <div className="dt-card-body">
-              <p className="dt-fallback-text">Not linked yet</p>
+              <p className="dt-fallback-text">Not set</p>
             </div>
           )}
         </div>
@@ -257,7 +359,7 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
           <div className="dt-status-item">
             <span className="dt-status-label">RESUME STATUS</span>
             <p className={`dt-status-value ${resumeUrl ? "is-success" : ""}`}>
-              {resumeUrl ? "Uploaded" : "Missing"}
+              {resumeUrl ? "Linked" : "Missing"}
             </p>
           </div>
           <div className="dt-status-item">
@@ -273,7 +375,7 @@ export default function DashboardTab({ profile, fileName, isLoading }) {
               <h3>Resume Document</h3>
             </div>
 
-            <p>{fileName || "Uploaded Resume"}</p>
+            <p>{fileName || "Resume Linked"}</p>
 
             <div className="resume-actions">
               <a

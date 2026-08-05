@@ -1,12 +1,8 @@
-import React from "react";
-import { useState } from "react";
+import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { createClient } from "@supabase/supabase-js";
 import {
   LayoutDashboard,
-  User,
-  FolderKanban,
-  Trophy,
   Settings,
   LogOut,
   PanelLeftClose,
@@ -17,18 +13,17 @@ import kalviumLogo from "../../assets/kalvium-logo.svg";
 import "./mentordashboard.css";
 import "./sidebar.css";
 
-const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
+const supabase = createClient(
+  import.meta.env.VITE_SUPABASE_URL,
+  import.meta.env.VITE_SUPABASE_ANON_KEY
+);
 
 const NAV_ITEMS = [
   { label: "Dashboard", icon: LayoutDashboard },
-  { label: "Profile", icon: User },
-  { label: "Projects", icon: FolderKanban },
-  { label: "Achievements", icon: Trophy },
   { label: "Settings", icon: Settings },
 ];
 
-const Sidebar = () => {
-  const [activeNav, setActiveNav] = useState("Dashboard");
+const Sidebar = ({ activeNav, setActiveNav }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const navigate = useNavigate();
 

@@ -19,7 +19,7 @@ function DashboardDispatcher({ user }) {
   }
 
   if (role === "mentor") {
-    return <MentorDashboard />;
+    return <MentorDashboard profile={user}/>;
   }
 
   return <Navigate to="/login" replace />;
