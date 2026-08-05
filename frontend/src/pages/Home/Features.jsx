@@ -53,13 +53,13 @@ const featureItems = [
     },
 ]
 
-const stats = [
-    { value: "500+", label: "Active Students" },
-    { value: "1000+", label: "Projects Published" },
-    { value: "300+", label: "Certificates Earned" },
-    { value: "150+", label: "Mentor Reviews" },
-    { value: "80+", label: "Internship Offers Shared" },
-]
+// const stats = [
+//     { value: "500+", label: "Active Students" },
+//     { value: "1000+", label: "Projects Published" },
+//     { value: "300+", label: "Certificates Earned" },
+//     { value: "150+", label: "Mentor Reviews" },
+//     { value: "80+", label: "Internship Offers Shared" },
+// ]
 
 export default function Features() {
     return (
@@ -96,7 +96,7 @@ export default function Features() {
                 </div>
             </section>
 
-            <section
+            {/* <section
                 className="highlights"
                 aria-labelledby="community-highlights-title"
             >
@@ -121,7 +121,7 @@ export default function Features() {
                         ))}
                     </div>
                 </div>
-            </section>
+            </section> */}
         </>
     )
 }
