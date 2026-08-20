@@ -13,7 +13,6 @@ function LazyAvatar({ src, alt }) {
     setIsLoaded(false);
   }, [src]);
 
-  // Handle cached images where onLoad won't fire automatically
   useEffect(() => {
     if (imgRef.current && imgRef.current.complete) {
       setIsLoaded(true);
@@ -22,7 +21,10 @@ function LazyAvatar({ src, alt }) {
 
   return (
     <div className="avatar-wrapper">
-      {!isLoaded && <div className="skeleton skeleton-avatar-placeholder" />}
+      {!isLoaded && (
+        <div className="skeleton skeleton-avatar-placeholder" />
+      )}
+
       <img
         ref={imgRef}
         src={imgSrc}
@@ -32,8 +34,11 @@ function LazyAvatar({ src, alt }) {
         className={`student-avatar ${isLoaded ? "loaded" : "loading"}`}
         onLoad={() => setIsLoaded(true)}
         onError={() => {
-          setImgSrc("/default-avatar.png");
-          setIsLoaded(true);
+          if (imgSrc !== "/default-avatar.png") {
+            setImgSrc("/default-avatar.png");
+          } else {
+            setIsLoaded(true);
+          }
         }}
       />
     </div>
@@ -42,10 +47,10 @@ function LazyAvatar({ src, alt }) {
 
 export default function Students() {
   const navigate = useNavigate();
+
   const [isLoading, setIsLoading] = useState(true);
   const [studentsData, setStudentsData] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 12;
 
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSquad, setSelectedSquad] = useState("all");
@@ -84,8 +89,16 @@ export default function Students() {
   const endIndex = Math.min(startIndex + itemsPerPage, totalItems);
   const currentStudents = sortedStudents.slice(startIndex, endIndex);
 
-  const itemsToRenderCount = isLoading ? itemsPerPage : currentStudents.length;
+  const currentStudents = filteredStudents.slice(
+    startIndex,
+    endIndex
+  );
 
+  const itemsToRenderCount = isLoading
+    ? itemsPerPage
+    : currentStudents.length;
+
+  // Fetch students
   useEffect(() => {
     let isMounted = true;
 
@@ -97,11 +110,20 @@ export default function Students() {
 
         if (!isMounted) return;
 
-        const formattedStudents = data.map((student) => ({
+        // Protect against API returning a non-array
+        const students = Array.isArray(data) ? data : [];
+
+        const formattedStudents = students.map((student) => ({
           user_id: student.user_id,
           squad_id: student.squad_id,
           name: student.name || "Unknown",
           role: student.title || student.role || "Student",
+
+          // Used for Squad 138 / Squad 139 filtering
+          squad_id: String(
+            student.squad_id ?? student.squadId ?? ""
+          ),
+
           avatar:
             student.avatar_url && student.avatar_url.trim() !== ""
               ? student.avatar_url
@@ -119,6 +141,10 @@ export default function Students() {
         setStudentsData(formattedStudents);
       } catch (error) {
         console.error("Error fetching students:", error);
+
+        if (isMounted) {
+          setStudentsData([]);
+        }
       } finally {
         if (isMounted) {
           setIsLoading(false);
@@ -133,6 +159,7 @@ export default function Students() {
     };
   }, []);
 
+  // Reset pagination when filters change
   useEffect(() => {
     setCurrentPage(1);
   }, [searchQuery, selectedSquad, sortOrder]);
@@ -140,7 +167,10 @@ export default function Students() {
   const handlePageChange = (page) => {
     if (page >= 1 && page <= totalPages && page !== currentPage) {
       setCurrentPage(page);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
     }
   };
 
@@ -151,25 +181,34 @@ export default function Students() {
     let showPages = [1, 2, 3];
 
     if (currentPage > 2) {
-      showPages = [currentPage - 1, currentPage, currentPage + 1].filter(
-        (p) => p < totalPages
-      );
+      showPages = [
+        currentPage - 1,
+        currentPage,
+        currentPage + 1,
+      ].filter((p) => p < totalPages);
     }
+
     if (currentPage === totalPages && totalPages > 2) {
-      showPages = [totalPages - 2, totalPages - 1].filter((p) => p > 1);
+      showPages = [
+        totalPages - 2,
+        totalPages - 1,
+      ].filter((p) => p > 1);
     }
 
     if (showPages[0] > 1) {
       pages.push(
         <button
           key={1}
-          className={`page-btn ${currentPage === 1 ? "active" : ""}`}
+          className={`page-btn ${
+            currentPage === 1 ? "active" : ""
+          }`}
           onClick={() => handlePageChange(1)}
           aria-label="Go to page 1"
         >
           1
         </button>
       );
+
       if (showPages[0] > 2) {
         pages.push(
           <span key="dots-start" className="page-dots">
@@ -183,7 +222,9 @@ export default function Students() {
       pages.push(
         <button
           key={page}
-          className={`page-btn ${currentPage === page ? "active" : ""}`}
+          className={`page-btn ${
+            currentPage === page ? "active" : ""
+          }`}
           onClick={() => handlePageChange(page)}
           aria-label={`Go to page ${page}`}
         >
@@ -204,7 +245,9 @@ export default function Students() {
       pages.push(
         <button
           key={totalPages}
-          className={`page-btn ${currentPage === totalPages ? "active" : ""}`}
+          className={`page-btn ${
+            currentPage === totalPages ? "active" : ""
+          }`}
           onClick={() => handlePageChange(totalPages)}
           aria-label={`Go to page ${totalPages}`}
         >
@@ -238,6 +281,7 @@ export default function Students() {
               onChange={(e) => setSearchQuery(e.target.value)}
             />
           </div>
+
           <div className="filters-row">
             <select
               value={selectedSquad}
@@ -266,50 +310,66 @@ export default function Students() {
       {/* Results Info */}
       <div className="results-info">
         {isLoading ? (
-          <span className="skeleton skeleton-inline-text"></span>
+          <span className="skeleton skeleton-inline-text" />
+        ) : totalItems === 0 ? (
+          "No students found"
         ) : (
           <>
-            {totalItems === 0 ? (
-              "No students found"
-            ) : (
-              `Showing ${startIndex + 1}-${endIndex} of `
-            )}
-            {totalItems > 0 && <span className="highlight">{totalItems}</span>}{" "}
-            {totalItems > 0 && "students"}
+            Showing {startIndex + 1}-{endIndex} of{" "}
+            <span className="highlight">{totalItems}</span> students
           </>
         )}
       </div>
 
+      {/* Students Grid */}
       <div className="students-grid">
         {isLoading ? (
-          Array.from({ length: itemsToRenderCount }).map((_, index) => (
-            <div className="student-card skeleton-card" key={`skeleton-${index}`}>
-              <div className="skeleton skeleton-badge"></div>
-              <div className="skeleton skeleton-avatar"></div>
-              <div className="skeleton skeleton-name"></div>
-              <div className="skeleton skeleton-role"></div>
+          Array.from({
+            length: itemsToRenderCount,
+          }).map((_, index) => (
+            <div
+              className="student-card skeleton-card"
+              key={`skeleton-${index}`}
+            >
+              <div className="skeleton skeleton-badge" />
+              <div className="skeleton skeleton-avatar" />
+              <div className="skeleton skeleton-name" />
+              <div className="skeleton skeleton-role" />
 
               <div className="student-skills">
-                <div className="skeleton skeleton-skill"></div>
-                <div className="skeleton skeleton-skill"></div>
-                <div className="skeleton skeleton-skill"></div>
+                <div className="skeleton skeleton-skill" />
+                <div className="skeleton skeleton-skill" />
+                <div className="skeleton skeleton-skill" />
               </div>
 
-              <div className="skeleton skeleton-btn"></div>
+              <div className="skeleton skeleton-btn" />
             </div>
           ))
         ) : (
           currentStudents.map((student) => (
-            <div className="student-card" key={student.user_id}>
-              {/* Lazy Loaded Avatar */}
-              <LazyAvatar src={student.avatar} alt={student.name} />
+            <div
+              className="student-card"
+              key={student.user_id}
+            >
+              <LazyAvatar
+                src={student.avatar}
+                alt={student.name}
+              />
 
-              <h3 className="student-name">{student.name}</h3>
-              <p className="student-role">{student.role}</p>
+              <h3 className="student-name">
+                {student.name}
+              </h3>
+
+              <p className="student-role">
+                {student.role}
+              </p>
 
               <div className="student-skills">
                 {student.skills.map((skill, index) => (
-                  <span key={index} className="skill-tag">
+                  <span
+                    key={index}
+                    className="skill-tag"
+                  >
                     {skill}
                   </span>
                 ))}
@@ -317,9 +377,9 @@ export default function Students() {
 
               <button
                 className="view-profile-btn"
-                onClick={() => {
-                  navigate(`/portfolio/${student.user_id}`);
-                }}
+                onClick={() =>
+                  navigate(`/portfolio/${student.user_id}`)
+                }
               >
                 View Profile
               </button>
@@ -328,12 +388,14 @@ export default function Students() {
         )}
       </div>
 
-      {/* Pagination Controls */}
+      {/* Pagination */}
       {totalPages > 1 && (
         <div className="pagination">
           <button
             className="page-btn nav-btn"
-            onClick={() => handlePageChange(currentPage - 1)}
+            onClick={() =>
+              handlePageChange(currentPage - 1)
+            }
             disabled={currentPage === 1}
             aria-label="Previous Page"
           >
@@ -344,7 +406,9 @@ export default function Students() {
 
           <button
             className="page-btn nav-btn"
-            onClick={() => handlePageChange(currentPage + 1)}
+            onClick={() =>
+              handlePageChange(currentPage + 1)
+            }
             disabled={currentPage === totalPages}
             aria-label="Next Page"
           >

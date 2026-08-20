@@ -7,18 +7,16 @@ const router = express.Router();
 // CONFIG
 // ============================================================
 
-const delay = (ms) =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const getRandomDelay = (min = 1500, max = 3000) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
 const MAX_RETRIES = 3;
 
-const LEETCODE_GRAPHQL_URL =
-  "https://leetcode.com/graphql";
+const LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql";
 
-const RAPID_SOLVE_SECONDS = 120;
+const RAPID_SOLVE_SECONDS = 0;
 
 // ============================================================
 // VALIDATE LEETCODE USERNAME
@@ -34,31 +32,21 @@ const isValidLeetCodeUsername = (username) =>
 const extractUsername = (input) => {
   if (!input) return null;
 
-  const cleanInput = input
-    .trim()
-    .split("?")[0]
-    .split("#")[0];
+  const cleanInput = input.trim().split("?")[0].split("#")[0];
 
   try {
     if (cleanInput.includes("leetcode.com")) {
-      const match = cleanInput.match(
-        /leetcode\.com\/(?:u\/)?([^/]+)/
-      );
+      const match = cleanInput.match(/leetcode\.com\/(?:u\/)?([^/]+)/);
 
-      return (
-        match?.[1]?.replace(/\/$/, "") || null
-      );
+      return match?.[1]?.replace(/\/$/, "") || null;
     }
 
     return cleanInput.replace(/\/$/, "");
   } catch (error) {
-    console.error(
-      "[USERNAME EXTRACTION ERROR]",
-      {
-        input,
-        message: error.message,
-      }
-    );
+    console.error("[USERNAME EXTRACTION ERROR]", {
+      input,
+      message: error.message,
+    });
 
     return null;
   }
@@ -68,11 +56,7 @@ const extractUsername = (input) => {
 // SUPABASE ERROR LOGGER
 // ============================================================
 
-const logSupabaseError = (
-  context,
-  error,
-  extra = {}
-) => {
+const logSupabaseError = (context, error, extra = {}) => {
   console.error("\n[SUPABASE ERROR]");
   console.error(`Context : ${context}`);
 
@@ -86,14 +70,297 @@ const logSupabaseError = (
         hint: error?.hint,
       },
       null,
-      2
-    )
+      2,
+    ),
   );
 
-  console.error(
-    "-----------------------------------------------"
-  );
+  console.error("-----------------------------------------------");
 };
+
+// ============================================================
+// FIND RAPID SUBMISSIONS
+// ============================================================
+
+function findRapidSubmissionIds(submissions) {
+  const rapidIds = new Set();
+
+  if (!submissions || submissions.length < 2) {
+    return rapidIds;
+  }
+
+  const sorted = [...submissions]
+    .filter((submission) => submission?.id && submission?.timestamp)
+    .sort((a, b) => Number(a.timestamp) - Number(b.timestamp));
+
+  for (let i = 1; i < sorted.length; i++) {
+    const previous = Number(sorted[i - 1].timestamp);
+
+    const current = Number(sorted[i].timestamp);
+
+    const difference = current - previous;
+
+    if (difference >= 0 && difference < RAPID_SOLVE_SECONDS) {
+      const previousId = String(sorted[i - 1].id);
+
+      const currentId = String(sorted[i].id);
+
+      rapidIds.add(previousId);
+      rapidIds.add(currentId);
+
+      console.log(
+        `[RAPID SOLVE DETECTED] ` +
+          `${sorted[i - 1].titleSlug} <-> ` +
+          `${sorted[i].titleSlug} | ` +
+          `${difference}s apart`,
+      );
+    }
+  }
+
+  return rapidIds;
+}
+
+// ============================================================
+// SAVE LEETCODE SUBMISSIONS
+// ============================================================
+
+async function saveLeetCodeSubmissions(userId, username, submissions) {
+  if (!userId) {
+    console.error("[SUBMISSIONS] Missing userId");
+
+    return {
+      success: false,
+      count: 0,
+    };
+  }
+
+  if (!Array.isArray(submissions) || submissions.length === 0) {
+    console.log(`[SUBMISSIONS] ${username} | No recent accepted submissions`);
+
+    return {
+      success: true,
+      count: 0,
+    };
+  }
+
+  console.log(
+    `[SUBMISSIONS] ${username} | Found ${submissions.length} accepted submissions`,
+  );
+
+  // ----------------------------------------------------------
+  // Detect suspicious rapid submissions
+  // ----------------------------------------------------------
+
+  const rapidIds = findRapidSubmissionIds(submissions);
+
+  // ----------------------------------------------------------
+  // Get existing submissions
+  // ----------------------------------------------------------
+
+  const submissionIds = submissions
+    .map((submission) => String(submission.id))
+    .filter(Boolean);
+
+  const { data: existingSubmissions, error: existingError } =
+    await supabaseAdmin
+      .from("leetcode_submissions")
+      .select(
+        `
+      submission_id,
+      review_status,
+      flag_reason
+    `,
+      )
+      .eq("user_id", userId)
+      .in("submission_id", submissionIds);
+
+  if (existingError) {
+    logSupabaseError("Fetching existing submissions", existingError, {
+      userId,
+      username,
+    });
+
+    return {
+      success: false,
+      count: 0,
+    };
+  }
+
+  const existingMap = {};
+
+  for (const existing of existingSubmissions || []) {
+    existingMap[String(existing.submission_id)] = existing;
+  }
+
+  // ----------------------------------------------------------
+  // Build rows
+  // ----------------------------------------------------------
+
+  const rows = submissions.map((submission) => {
+    const submissionId = String(submission.id);
+
+    const isRapid = rapidIds.has(submissionId);
+
+    const existing = existingMap[submissionId];
+
+    let reviewStatus = existing?.review_status || "approved";
+
+    let flagReason = existing?.flag_reason || null;
+
+    let status = existing?.status || "ACCEPTED";
+
+    // ======================================================
+    // CHEAT DETECTION
+    // ======================================================
+
+    // Only create a new review when the submission
+    // has NOT already been reviewed.
+    //
+    // APPROVED  -> stay approved
+    // REJECTED  -> stay rejected
+    // PENDING   -> stay pending
+    // NEW + rapid -> pending
+
+    const alreadyReviewed =
+      existing?.review_status === "approved" ||
+      existing?.review_status === "rejected";
+
+    if (false && isRapid && !alreadyReviewed) {
+      reviewStatus = "pending";
+
+      flagReason = "Rapid submission pattern detected";
+
+      status = "PENDING_REVIEW";
+    }
+
+    return {
+      user_id: userId,
+
+      leetcode_username: username,
+
+      submission_id: submissionId,
+
+      title_slug: submission.titleSlug || null,
+
+      difficulty: submission.difficulty || null,
+
+      submitted_at: submission.timestamp
+        ? new Date(Number(submission.timestamp) * 1000).toISOString()
+        : null,
+
+      status,
+
+      flag_reason: flagReason,
+
+      review_status: reviewStatus,
+
+      created_at: new Date().toISOString(),
+    };
+  });
+
+  // ----------------------------------------------------------
+  // UPSERT
+  // ----------------------------------------------------------
+
+  const { data, error } = await supabaseAdmin
+    .from("leetcode_submissions")
+    .upsert(rows, {
+      onConflict: "user_id,submission_id",
+    })
+    .select();
+
+  if (error) {
+    logSupabaseError("Saving LeetCode submissions", error, {
+      userId,
+      username,
+      submissionCount: rows.length,
+    });
+
+    return {
+      success: false,
+      count: 0,
+    };
+  }
+
+  console.log(
+    `[SUBMISSIONS SAVED] ${username} | ${data?.length || rows.length} records`,
+  );
+
+  if (rapidIds.size > 0) {
+    console.log(
+      `[CHEAT DETECTION] ${username} | ${rapidIds.size} submissions flagged`,
+    );
+  }
+
+  return {
+    success: true,
+    count: data?.length || rows.length,
+    rapidCount: rapidIds.size,
+  };
+}
+
+// ============================================================
+// UPDATE LEADERBOARD SUSPENSION STATUS
+// ============================================================
+
+async function updateLeaderboardSuspensionStatus(userId, profileId) {
+  try {
+    const { data: pendingReviews, error: pendingError } = await supabaseAdmin
+      .from("leetcode_submissions")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("review_status", "pending")
+      .limit(1);
+
+    if (pendingError) {
+      logSupabaseError("Suspension check failed", pendingError, {
+        userId,
+        profileId,
+      });
+
+      return false;
+    }
+
+    const hasPendingReviews =
+      Array.isArray(pendingReviews) && pendingReviews.length > 0;
+
+    const { error: updateError } = await supabaseAdmin
+      .from("leetcode_leaderboard")
+      .update({
+        is_suspended: hasPendingReviews,
+
+        suspension_reason: hasPendingReviews
+          ? "Pending mentor review for suspicious submission patterns"
+          : null,
+
+        updated_at: new Date().toISOString(),
+      })
+      .eq("profile_id", profileId);
+
+    if (updateError) {
+      logSupabaseError("Updating leaderboard suspension", updateError, {
+        userId,
+        profileId,
+        hasPendingReviews,
+      });
+
+      return false;
+    }
+
+    if (hasPendingReviews) {
+      console.log(
+        `[SUSPENSION] user_id: ${userId} | Suspended until mentor review`,
+      );
+    } else {
+      console.log(`[SUSPENSION LIFTED] user_id: ${userId}`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error(`[SUSPENSION EXCEPTION] user_id: ${userId}`, error.message);
+
+    return false;
+  }
+}
 
 // ============================================================
 // MENTOR REVIEW QUEUE
@@ -101,91 +368,74 @@ const logSupabaseError = (
 
 router.get("/queue", async (req, res) => {
   try {
-    console.log(
-      "[MENTOR REVIEW] Fetching pending submissions..."
-    );
+    console.log("[MENTOR REVIEW] Fetching pending submissions...");
 
-    const {
-      data: submissions,
-      error: submissionError,
-    } = await supabaseAdmin
+    const { data: submissions, error: submissionError } = await supabaseAdmin
       .from("leetcode_submissions")
-      .select(`
-        id,
-        user_id,
-        leetcode_username,
-        submission_id,
-        title_slug,
-        difficulty,
-        submitted_at,
-        status,
-        flag_reason,
-        review_status,
-        created_at
-      `)
+      .select(
+        `
+          id,
+          user_id,
+          leetcode_username,
+          submission_id,
+          title_slug,
+          difficulty,
+          submitted_at,
+          status,
+          flag_reason,
+          review_status,
+          created_at
+        `,
+      )
       .eq("review_status", "pending")
       .order("submitted_at", {
         ascending: false,
       });
 
     if (submissionError) {
-      logSupabaseError(
-        "Fetching pending submissions",
-        submissionError
-      );
+      logSupabaseError("Fetching pending submissions", submissionError);
 
       return res.status(500).json({
-        error:
-          "Failed to fetch mentor review queue",
+        error: "Failed to fetch mentor review queue",
       });
     }
 
-    if (
-      !submissions ||
-      submissions.length === 0
-    ) {
+    if (!submissions || submissions.length === 0) {
       return res.status(200).json({
         reviews: [],
       });
     }
 
-    // ========================================================
+    // ------------------------------------------------------
     // UNIQUE STUDENTS
-    // ========================================================
+    // ------------------------------------------------------
 
     const studentIds = [
       ...new Set(
-        submissions.map(
-          (submission) => submission.user_id
-        )
+        submissions.map((submission) => submission.user_id).filter(Boolean),
       ),
     ];
 
-    // ========================================================
+    // ------------------------------------------------------
     // PROFILES
-    // ========================================================
+    // ------------------------------------------------------
 
-    const {
-      data: profiles,
-      error: profileError,
-    } = await supabaseAdmin
+    const { data: profiles, error: profileError } = await supabaseAdmin
       .from("profiles")
-      .select(`
-        user_id,
-        name,
-        avatar_url
-      `)
+      .select(
+        `
+          user_id,
+          name,
+          avatar_url
+        `,
+      )
       .in("user_id", studentIds);
 
     if (profileError) {
-      logSupabaseError(
-        "Fetching student profiles",
-        profileError
-      );
+      logSupabaseError("Fetching student profiles", profileError);
 
       return res.status(500).json({
-        error:
-          "Failed to fetch student profiles",
+        error: "Failed to fetch student profiles",
       });
     }
 
@@ -195,142 +445,108 @@ router.get("/queue", async (req, res) => {
       profileMap[profile.user_id] = profile;
     }
 
-    // ========================================================
+    // ------------------------------------------------------
     // SQUADS
-    // ========================================================
+    // ------------------------------------------------------
 
-    const {
-      data: squadStudents,
-      error: squadError,
-    } = await supabaseAdmin
+    const { data: squadStudents, error: squadError } = await supabaseAdmin
       .from("squad_students")
-      .select(`
-        student_user_id,
-        squad_id
-      `)
+      .select(
+        `
+          student_user_id,
+          squad_id
+        `,
+      )
       .in("student_user_id", studentIds);
 
     if (squadError) {
-      logSupabaseError(
-        "Fetching student squads",
-        squadError
-      );
+      logSupabaseError("Fetching student squads", squadError);
 
       return res.status(500).json({
-        error:
-          "Failed to fetch student squads",
+        error: "Failed to fetch student squads",
       });
     }
 
     const squadMap = {};
 
     for (const squad of squadStudents || []) {
-      squadMap[squad.student_user_id] =
-        squad.squad_id;
+      squadMap[squad.student_user_id] = squad.squad_id;
     }
 
-    // ========================================================
+    // ------------------------------------------------------
     // LEADERBOARD
-    // ========================================================
+    // ------------------------------------------------------
 
-    const {
-      data: leaderboardRecords,
-      error: leaderboardError,
-    } = await supabaseAdmin
-      .from("leetcode_leaderboard")
-      .select(`
-        user_id,
-        easy_solved,
-        medium_solved,
-        hard_solved,
-        total_solved,
-        score,
-        ranking,
-        leetcode_username
-      `)
-      .in("user_id", studentIds);
+    const { data: leaderboardRecords, error: leaderboardError } =
+      await supabaseAdmin
+        .from("leetcode_leaderboard")
+        .select(
+          `
+          user_id,
+          easy_solved,
+          medium_solved,
+          hard_solved,
+          total_solved,
+          score,
+          ranking,
+          leetcode_username
+        `,
+        )
+        .in("user_id", studentIds);
 
     if (leaderboardError) {
-      logSupabaseError(
-        "Fetching leaderboard data",
-        leaderboardError
-      );
+      logSupabaseError("Fetching leaderboard data", leaderboardError);
 
       return res.status(500).json({
-        error:
-          "Failed to fetch leaderboard data",
+        error: "Failed to fetch leaderboard data",
       });
     }
 
     const leaderboardMap = {};
 
-    for (
-      const leaderboard of
-        leaderboardRecords || []
-    ) {
-      leaderboardMap[leaderboard.user_id] =
-        leaderboard;
+    for (const leaderboard of leaderboardRecords || []) {
+      leaderboardMap[leaderboard.user_id] = leaderboard;
     }
 
-    // ========================================================
-    // GROUP SUBMISSIONS
-    // ========================================================
+    // ------------------------------------------------------
+    // GROUP
+    // ------------------------------------------------------
 
     const studentMap = {};
 
     for (const submission of submissions) {
       const userId = submission.user_id;
 
-      const profile =
-        profileMap[userId];
+      const profile = profileMap[userId];
 
-      const leaderboard =
-        leaderboardMap[userId];
+      const leaderboard = leaderboardMap[userId];
 
       if (!studentMap[userId]) {
         studentMap[userId] = {
           student_user_id: userId,
 
-          name:
-            profile?.name ||
-            "Student",
+          name: profile?.name || "Student",
 
-          avatar_url:
-            profile?.avatar_url ||
-            null,
+          avatar_url: profile?.avatar_url || null,
 
-          squad_id:
-            squadMap[userId] ||
-            null,
+          squad_id: squadMap[userId] || null,
 
           leetcode_username:
             leaderboard?.leetcode_username ||
             submission.leetcode_username ||
             "unknown",
 
-          easy_solved:
-            leaderboard?.easy_solved ||
-            0,
+          easy_solved: leaderboard?.easy_solved || 0,
 
-          medium_solved:
-            leaderboard?.medium_solved ||
-            0,
+          medium_solved: leaderboard?.medium_solved || 0,
 
-          hard_solved:
-            leaderboard?.hard_solved ||
-            0,
+          hard_solved: leaderboard?.hard_solved || 0,
 
-          total_solved:
-            leaderboard?.total_solved ||
-            0,
+          total_solved: leaderboard?.total_solved || 0,
 
-          score:
-            leaderboard?.score ||
-            0,
+          score: leaderboard?.score || 0,
 
-          ranking:
-            leaderboard?.ranking ||
-            0,
+          ranking: leaderboard?.ranking || 0,
 
           pending_review_count: 0,
 
@@ -338,55 +554,38 @@ router.get("/queue", async (req, res) => {
         };
       }
 
-      studentMap[userId]
-        .pending_review_count++;
+      studentMap[userId].pending_review_count++;
 
-      studentMap[userId]
-        .submissions
-        .push({
-          id: submission.id,
+      studentMap[userId].submissions.push({
+        id: submission.id,
 
-          submission_id:
-            submission.submission_id,
+        submission_id: submission.submission_id,
 
-          title_slug:
-            submission.title_slug,
+        title_slug: submission.title_slug,
 
-          difficulty:
-            submission.difficulty,
+        difficulty: submission.difficulty,
 
-          submitted_at:
-            submission.submitted_at,
+        submitted_at: submission.submitted_at,
 
-          status:
-            submission.status,
+        status: submission.status,
 
-          flag_reason:
-            submission.flag_reason,
+        flag_reason: submission.flag_reason,
 
-          review_status:
-            submission.review_status,
+        review_status: submission.review_status,
 
-          created_at:
-            submission.created_at,
-        });
+        created_at: submission.created_at,
+      });
     }
 
-    const reviews =
-      Object.values(studentMap);
+    const reviews = Object.values(studentMap);
 
-    console.log(
-      `[MENTOR REVIEW] ${reviews.length} students pending`
-    );
+    console.log(`[MENTOR REVIEW] ${reviews.length} students pending`);
 
     return res.status(200).json({
       reviews,
     });
   } catch (error) {
-    console.error(
-      "[MENTOR REVIEW QUEUE EXCEPTION]",
-      error
-    );
+    console.error("[MENTOR REVIEW QUEUE EXCEPTION]", error);
 
     return res.status(500).json({
       error: "Internal server error",
@@ -398,16 +597,34 @@ router.get("/queue", async (req, res) => {
 // APPROVE MENTOR REVIEW
 // ============================================================
 
-router.patch(
-  "/:studentUserId/approve",
-  async (req, res) => {
-    const { studentUserId } =
-      req.params;
+router.patch("/:studentUserId/approve", async (req, res) => {
+  const { studentUserId } = req.params;
 
-    if (!studentUserId) {
-      return res.status(400).json({
-        error:
-          "Student user ID is required",
+  if (!studentUserId) {
+    return res.status(400).json({
+      error: "Student user ID is required",
+    });
+  }
+
+  try {
+    console.log(`[MENTOR REVIEW] Approving submissions for ${studentUserId}`);
+
+    const { data, error } = await supabaseAdmin
+      .from("leetcode_submissions")
+      .update({
+        review_status: "approved",
+
+        status: "APPROVED",
+
+        flag_reason: null,
+      })
+      .eq("user_id", studentUserId)
+      .eq("review_status", "pending")
+      .select();
+
+    if (error) {
+      logSupabaseError("Approving mentor review", error, {
+        studentUserId,
       });
     }
 
@@ -470,1119 +687,589 @@ router.patch(
       );
 
       return res.status(500).json({
-        error:
-          "Internal server error",
+        error: "Failed to approve submissions",
       });
     }
+
+    // ------------------------------------------------------
+    // Get profile ID
+    // ------------------------------------------------------
+
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .select("id")
+      .eq("user_id", studentUserId)
+      .maybeSingle();
+
+    if (profileError) {
+      logSupabaseError("Fetching profile for approval", profileError, {
+        studentUserId,
+      });
+    }
+
+    if (profile?.id) {
+      await updateLeaderboardSuspensionStatus(studentUserId, profile.id);
+    }
+
+    console.log(`[MENTOR REVIEW] Approved ${data?.length || 0} submissions`);
+
+    return res.status(200).json({
+      message: "Submissions approved successfully",
+
+      updatedCount: data?.length || 0,
+
+      reviews: data || [],
+    });
+  } catch (error) {
+    console.error("[APPROVE REVIEW EXCEPTION]", error);
+
+    return res.status(500).json({
+      error: "Internal server error",
+    });
   }
-);
+});
 
 // ============================================================
 // REJECT MENTOR REVIEW
 // ============================================================
 
-router.patch(
-  "/:studentUserId/reject",
-  async (req, res) => {
-    const { studentUserId } =
-      req.params;
+router.patch("/:studentUserId/reject", async (req, res) => {
+  const { studentUserId } = req.params;
 
-    if (!studentUserId) {
-      return res.status(400).json({
-        error:
-          "Student user ID is required",
+  if (!studentUserId) {
+    return res.status(400).json({
+      error: "Student user ID is required",
+    });
+  }
+
+  try {
+    console.log(`[MENTOR REVIEW] Rejecting submissions for ${studentUserId}`);
+
+    const { data, error } = await supabaseAdmin
+      .from("leetcode_submissions")
+      .update({
+        review_status: "rejected",
+
+        status: "REJECTED",
+      })
+      .eq("user_id", studentUserId)
+      .eq("review_status", "pending")
+      .select();
+
+    if (error) {
+      logSupabaseError("Rejecting mentor review", error, {
+        studentUserId,
       });
-    }
-
-    try {
-      console.log(
-        `[MENTOR REVIEW] Rejecting pending submissions for ${studentUserId}`
-      );
-
-      const {
-        data,
-        error,
-      } = await supabaseAdmin
-        .from("leetcode_submissions")
-        .update({
-          review_status: "rejected",
-          status: "REJECTED",
-        })
-        .eq("user_id", studentUserId)
-        .eq("review_status", "pending")
-        .select();
-
-      if (error) {
-        logSupabaseError(
-          "Rejecting mentor review",
-          error,
-          {
-            studentUserId,
-          }
-        );
-
-        return res.status(500).json({
-          error:
-            "Failed to reject submissions",
-        });
-      }
-
-      // Update leaderboard suspension status
-      await updateLeaderboardSuspensionStatus(studentUserId);
-
-      console.log(
-        `[MENTOR REVIEW] Rejected ${
-          data?.length || 0
-        } submissions`
-      );
-
-      return res.status(200).json({
-        message:
-          "Submissions rejected successfully",
-
-        updatedCount:
-          data?.length || 0,
-
-        reviews: data || [],
-      });
-    } catch (error) {
-      console.error(
-        "[REJECT REVIEW EXCEPTION]",
-        error
-      );
 
       return res.status(500).json({
-        error:
-          "Internal server error",
+        error: "Failed to reject submissions",
       });
     }
-  }
-);
 
-// ============================================================
-// DETECT RAPID SUBMISSIONS
-// ============================================================
+    // ------------------------------------------------------
+    // Get profile ID
+    // ------------------------------------------------------
 
-function findRapidSubmissionIds(
-  submissions
-) {
-  const rapidIds = new Set();
-
-  if (
-    !submissions ||
-    submissions.length < 2
-  ) {
-    return rapidIds;
-  }
-
-  const sorted = [...submissions]
-    .filter(
-      (submission) =>
-        submission?.id &&
-        submission?.timestamp
-    )
-    .sort(
-      (a, b) =>
-        Number(a.timestamp) -
-        Number(b.timestamp)
-    );
-
-  for (
-    let i = 1;
-    i < sorted.length;
-    i++
-  ) {
-    const previous =
-      Number(
-        sorted[i - 1].timestamp
-      );
-
-    const current =
-      Number(
-        sorted[i].timestamp
-      );
-
-    const difference =
-      current - previous;
-
-    if (
-      difference >= 0 &&
-      difference < RAPID_SOLVE_SECONDS
-    ) {
-      const previousId =
-        String(
-          sorted[i - 1].id
-        );
-
-      const currentId =
-        String(sorted[i].id);
-
-      rapidIds.add(previousId);
-      rapidIds.add(currentId);
-
-      console.log(
-        `[RAPID SOLVE DETECTED] ${
-          sorted[i - 1].titleSlug
-        } <-> ${
-          sorted[i].titleSlug
-        } | ${difference}s apart`
-      );
-    }
-  }
-
-  return rapidIds;
-}
-
-// ============================================================
-// CHECK & UPDATE LEADERBOARD SUSPENSION
-// ============================================================
-
-async function updateLeaderboardSuspensionStatus(userId) {
-  try {
-    // Check if user has ANY pending review submissions
-    const {
-      data: pendingReviews,
-      error: pendingError,
-    } = await supabaseAdmin
-      .from("leetcode_submissions")
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from("profiles")
       .select("id")
-      .eq("user_id", userId)
-      .eq("review_status", "pending")
-      .limit(1);
+      .eq("user_id", studentUserId)
+      .maybeSingle();
+
+    if (profileError) {
+      logSupabaseError("Fetching profile for rejection", profileError, {
+        studentUserId,
+      });
+    }
+
+    if (profile?.id) {
+      await updateLeaderboardSuspensionStatus(studentUserId, profile.id);
+    }
+
+    console.log(`[MENTOR REVIEW] Rejected ${data?.length || 0} submissions`);
+
+    return res.status(200).json({
+      message: "Submissions rejected successfully",
+
+      updatedCount: data?.length || 0,
+
+      reviews: data || [],
+    });
+  } catch (error) {
+    console.error("[REJECT REVIEW EXCEPTION]", error);
+
+    return res.status(500).json({
+      error: "Internal server error",
+    });
+  }
+});
+
+// ============================================================
+// PUBLIC LEADERBOARD
+// ============================================================
+
+router.get("/leetcode-leaderboard", async (req, res) => {
+  try {
+    // ------------------------------------------------------
+    // 1. GET LEADERBOARD
+    // ------------------------------------------------------
+
+    const { data: leaderboardData, error: leaderboardError } =
+      await supabaseAdmin
+        .from("leetcode_leaderboard")
+        .select(
+          `
+          id,
+          profile_id,
+          user_id,
+          leetcode_username,
+          easy_solved,
+          medium_solved,
+          hard_solved,
+          total_solved,
+          ranking,
+          score,
+          updated_at,
+          last_solved_at,
+          is_leetcode_active,
+          is_suspended,
+          suspension_reason
+        `,
+        )
+        .order("score", {
+          ascending: false,
+        });
+
+    if (leaderboardError) {
+      logSupabaseError("Fetching public leaderboard", leaderboardError);
+
+      return res.status(400).json({
+        error: leaderboardError.message,
+      });
+    }
+
+    if (!leaderboardData || leaderboardData.length === 0) {
+      return res.json([]);
+    }
+
+    // ------------------------------------------------------
+    // 2. GET PROFILES
+    // ------------------------------------------------------
+
+    const userIds = leaderboardData.map((row) => row.user_id).filter(Boolean);
+
+    const { data: profiles, error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .select(
+        `
+          user_id,
+          name,
+          squad_id,
+          avatar_url
+        `,
+      )
+      .in("user_id", userIds);
+
+    if (profileError) {
+      logSupabaseError("Fetching leaderboard profiles", profileError);
+    }
+
+    const profileMap = {};
+
+    for (const profile of profiles || []) {
+      profileMap[profile.user_id] = profile;
+    }
+
+    // ------------------------------------------------------
+    // 3. GET PENDING SUBMISSIONS
+    // ------------------------------------------------------
+
+    const { data: pendingSubmissions, error: pendingError } =
+      await supabaseAdmin
+        .from("leetcode_submissions")
+        .select("user_id")
+        .eq("review_status", "pending");
 
     if (pendingError) {
-      console.error(
-        `[SUSPENSION CHECK ERROR] user_id: ${userId}`,
-        pendingError
-      );
-      return;
+      logSupabaseError("Fetching pending submissions", pendingError);
+
+      return res.status(400).json({
+        error: pendingError.message,
+      });
     }
 
-    const hasPendingReviews =
-      pendingReviews &&
-      pendingReviews.length > 0;
+    // ------------------------------------------------------
+    // 4. COUNT PENDING
+    // ------------------------------------------------------
 
-    // Update leaderboard suspension status
-    const {
-      error: updateError,
-    } = await supabaseAdmin
-      .from("leetcode_leaderboard")
-      .update({
-        is_suspended:
-          hasPendingReviews,
+    const pendingCountMap = {};
 
-        suspension_reason:
-          hasPendingReviews
-            ? "Pending mentor review for suspicious submission patterns"
-            : null,
+    for (const submission of pendingSubmissions || []) {
+      const userId = submission.user_id;
 
-        updated_at:
-          new Date().toISOString(),
-      })
-      .eq("user_id", userId);
+      if (!userId) continue;
 
-    if (updateError) {
-      console.error(
-        `[SUSPENSION UPDATE ERROR] user_id: ${userId}`,
-        updateError
-      );
-      return;
+      pendingCountMap[userId] = (pendingCountMap[userId] || 0) + 1;
     }
 
-    if (hasPendingReviews) {
-      console.log(
-        `[SUSPENSION] user_id: ${userId} | Suspended until mentor review complete`
-      );
-    } else {
-      console.log(
-        `[SUSPENSION LIFTED] user_id: ${userId} | All submissions resolved`
-      );
-    }
-  } catch (error) {
-    console.error(
-      `[SUSPENSION CHECK EXCEPTION] user_id: ${userId}`,
-      error.message
-    );
-  }
-}
+    // ------------------------------------------------------
+    // 5. BUILD RESULT
+    // ------------------------------------------------------
 
-// ============================================================
-// SAVE LEETCODE SUBMISSIONS
-// ============================================================
+    const result = leaderboardData
+      .map((entry) => {
+        const pendingReviewCount = pendingCountMap[entry.user_id] || 0;
 
-async function saveLeetCodeSubmissions(
-  userId,
-  username,
-  recentSubmissions
-) {
-  if (
-    !recentSubmissions ||
-    recentSubmissions.length === 0
-  ) {
-    console.log(
-      `[SUBMISSIONS] ${username} | No accepted submissions found`
-    );
-
-    return;
-  }
-
-  console.log(
-    `[SUBMISSIONS] ${username} | Found ${recentSubmissions.length} accepted submissions`
-  );
-
-  // ==========================================================
-  // 1. VALID SUBMISSIONS
-  // ==========================================================
-
-  const validSubmissions =
-    recentSubmissions
-      .filter(
-        (submission) =>
-          submission?.id &&
-          submission?.timestamp
-      )
-      .sort(
-        (a, b) =>
-          Number(a.timestamp) -
-          Number(b.timestamp)
-      );
-
-  if (validSubmissions.length === 0) {
-    console.log(
-      `[SUBMISSIONS] ${username} | No valid submissions`
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // 2. DETECT RAPID SUBMISSIONS
-  // ==========================================================
-
-  const rapidSubmissionIds =
-    findRapidSubmissionIds(
-      validSubmissions
-    );
-
-  console.log(
-    `[RAPID CHECK] ${username} | ${rapidSubmissionIds.size} submissions flagged`
-  );
-
-  // ==========================================================
-  // 3. GET EXISTING DATABASE RECORDS
-  // ==========================================================
-
-  const submissionIds =
-    validSubmissions.map(
-      (submission) =>
-        String(submission.id)
-    );
-
-  const {
-    data: existingRecords,
-    error: existingError,
-  } = await supabaseAdmin
-    .from("leetcode_submissions")
-    .select(`
-      submission_id,
-      review_status,
-      status,
-      flag_reason
-    `)
-    .in(
-      "submission_id",
-      submissionIds
-    );
-
-  if (existingError) {
-    logSupabaseError(
-      "Fetching existing submissions",
-      existingError,
-      {
-        username,
-      }
-    );
-
-    return;
-  }
-
-  // ==========================================================
-  // 4. CREATE EXISTING SUBMISSION MAP
-  // ==========================================================
-
-  const existingMap = {};
-
-  for (
-    const record of
-      existingRecords || []
-  ) {
-    existingMap[
-      String(
-        record.submission_id
-      )
-    ] = record;
-  }
-
-  // ==========================================================
-  // 5. BUILD DATABASE RECORDS
-  // ==========================================================
-
-  const submissionRecords =
-    validSubmissions.map(
-      (submission) => {
-        const submissionId =
-          String(
-            submission.id
-          );
-
-        const existing =
-          existingMap[
-            submissionId
-          ];
-
-        const isRapid =
-          rapidSubmissionIds.has(
-            submissionId
-          );
-
-        let reviewStatus;
-        let status;
-        let flagReason;
-
-        // ====================================================
-        // IMPORTANT:
-        // RAPID DETECTION MUST HAVE HIGHEST PRIORITY
-        // ====================================================
-
-        if (isRapid) {
-          reviewStatus =
-            "pending";
-
-          status =
-            "PENDING";
-
-          flagReason =
-            "Rapid consecutive solve (< 2 minutes)";
-
-          console.log(
-            `[MENTOR REVIEW FLAG] ${username} | ${submissionId} | ${flagReason}`
-          );
-        }
-
-        // ====================================================
-        // REJECTED SUBMISSIONS
-        // ====================================================
-
-        else if (
-          existing?.review_status ===
-          "rejected"
-        ) {
-          reviewStatus =
-            "rejected";
-
-          status =
-            "REJECTED";
-
-          flagReason =
-            existing.flag_reason ||
-            "Rejected by mentor";
-        }
-
-        // ====================================================
-        // PENDING SUBMISSIONS
-        // ====================================================
-
-        else if (
-          existing?.review_status ===
-          "pending"
-        ) {
-          reviewStatus =
-            "pending";
-
-          status =
-            "PENDING";
-
-          flagReason =
-            existing.flag_reason ||
-            "Pending mentor review";
-        }
-
-        // ====================================================
-        // APPROVED SUBMISSIONS
-        // ====================================================
-
-        else if (
-          existing?.review_status ===
-          "approved"
-        ) {
-          reviewStatus =
-            "approved";
-
-          status =
-            "APPROVED";
-
-          flagReason =
-            null;
-        }
-
-        // ====================================================
-        // NEW NORMAL SUBMISSION
-        // ====================================================
-
-        else {
-          reviewStatus =
-            "approved";
-
-          status =
-            "APPROVED";
-
-          flagReason =
-            null;
-        }
+        const profile = profileMap[entry.user_id] || {};
 
         return {
-          user_id:
-            userId,
+          ...entry,
 
-          leetcode_username:
-            username,
+          profiles: profile,
 
-          submission_id:
-            submissionId,
+          pending_review_count: pendingReviewCount,
 
-          title_slug:
-            submission.titleSlug,
-
-          difficulty:
-            null,
-
-          submitted_at:
-            new Date(
-              Number(
-                submission.timestamp
-              ) * 1000
-            ).toISOString(),
-
-          review_status:
-            reviewStatus,
-
-          status,
-
-          flag_reason:
-            flagReason,
+          is_under_review: pendingReviewCount > 0,
         };
-      }
+      })
+
+      // --------------------------------------------------
+      // HIDE UNDER REVIEW
+      // --------------------------------------------------
+
+      .filter((student) => !student.is_under_review && !student.is_suspended)
+
+      // --------------------------------------------------
+      // SORT
+      // --------------------------------------------------
+
+      .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+
+    console.log(
+      `[PUBLIC LEADERBOARD] Total: ${leaderboardData.length} | Visible: ${result.length} | Pending: ${
+        pendingSubmissions?.length || 0
+      }`,
     );
 
-  // ==========================================================
-  // 6. UPSERT
-  // ==========================================================
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("[PUBLIC LEADERBOARD ERROR]", error);
 
-  const {
-    data,
-    error,
-  } = await supabaseAdmin
-    .from("leetcode_submissions")
-    .upsert(
-      submissionRecords,
-      {
-        onConflict:
-          "submission_id",
+    return res.status(500).json({
+      error: "Internal Server Error",
 
-        ignoreDuplicates:
-          false,
-      }
-    )
-    .select();
-
-  if (error) {
-    logSupabaseError(
-      `Submission save failed for ${username}`,
-      error,
-      {
-        userId,
-        username,
-        submissionCount:
-          submissionRecords.length,
-      }
-    );
-
-    return;
+      details: error.message,
+    });
   }
-
-  // ==========================================================
-  // 7. COUNTS
-  // ==========================================================
-
-  const pendingCount =
-    submissionRecords.filter(
-      (record) =>
-        record.review_status ===
-        "pending"
-    ).length;
-
-  const approvedCount =
-    submissionRecords.filter(
-      (record) =>
-        record.review_status ===
-        "approved"
-    ).length;
-
-  const rejectedCount =
-    submissionRecords.filter(
-      (record) =>
-        record.review_status ===
-        "rejected"
-    ).length;
-
-  console.log(
-    `[SUBMISSIONS SAVED] ${username} | ${
-      data?.length || 0
-    } records`
-  );
-
-  console.log(
-    `   Pending  : ${pendingCount}`
-  );
-
-  console.log(
-    `   Approved : ${approvedCount}`
-  );
-
-  console.log(
-    `   Rejected : ${rejectedCount}`
-  );
-}
+});
 
 // ============================================================
 // NOTIFY MENTORS
 // ============================================================
 
 async function notifyMentorsAboutInactiveStudents() {
-  console.log(
-    "\n[EMAIL SYSTEM] Starting mentor notifications..."
-  );
+  console.log("\n[EMAIL SYSTEM] Starting mentor notifications...");
 
   try {
-    // ========================================================
+    // --------------------------------------------------------
     // 1. GET INACTIVE STUDENTS
-    // ========================================================
+    // --------------------------------------------------------
 
-    const {
-      data: inactiveRecords,
-      error: inactiveError,
-    } = await supabaseAdmin
+    const { data: inactiveRecords, error: inactiveError } = await supabaseAdmin
       .from("leetcode_leaderboard")
-      .select(`
+      .select(
+        `
         user_id,
-        last_solved_at,
-        profiles!inner (
-          name,
-          kalvium_email
-        )
-      `)
-      .eq(
-        "is_leetcode_active",
-        false
-      );
+        last_solved_at
+      `,
+      )
+      .eq("is_leetcode_active", false);
 
     if (inactiveError) {
       throw inactiveError;
     }
 
     console.log(
-      `[EMAIL SYSTEM] Inactive students: ${
-        inactiveRecords?.length || 0
-      }`
+      `[EMAIL SYSTEM] Inactive students: ${inactiveRecords?.length || 0}`,
     );
 
-    // ========================================================
-    // 2. GET STUDENT-MENTOR ASSIGNMENTS
-    // ========================================================
+    // --------------------------------------------------------
+    // 2. GET ASSIGNMENTS
+    // --------------------------------------------------------
 
-    const {
-      data: assignments,
-      error: assignmentError,
-    } = await supabaseAdmin
+    const { data: assignments, error: assignmentError } = await supabaseAdmin
       .from("squad_students")
-      .select(
-        "student_user_id, mentor_user_id"
-      );
+      .select("student_user_id, mentor_user_id");
 
     if (assignmentError) {
       throw assignmentError;
     }
 
-    if (
-      !assignments ||
-      assignments.length === 0
-    ) {
-      console.log(
-        "[EMAIL SYSTEM] No mentor-student assignments found."
-      );
+    if (!assignments || assignments.length === 0) {
+      console.log("[EMAIL SYSTEM] No mentor-student assignments found.");
 
       return;
     }
 
-    // ========================================================
-    // 3. STUDENT -> MULTIPLE MENTORS
-    // ========================================================
+    // --------------------------------------------------------
+    // 3. STUDENT -> MENTORS
+    // --------------------------------------------------------
 
     const studentToMentorsMap = {};
-
-    const allAssignedStudentUserIds =
-      new Set();
+    const allAssignedStudentUserIds = new Set();
 
     for (const assignment of assignments) {
-      const studentId =
-        assignment.student_user_id;
+      const studentId = assignment.student_user_id;
 
-      const mentorId =
-        assignment.mentor_user_id;
+      const mentorId = assignment.mentor_user_id;
 
       if (!studentId || !mentorId) {
         continue;
       }
 
-      if (
-        !studentToMentorsMap[
-          studentId
-        ]
-      ) {
-        studentToMentorsMap[
-          studentId
-        ] = [];
+      if (!studentToMentorsMap[studentId]) {
+        studentToMentorsMap[studentId] = [];
       }
 
-      if (
-        !studentToMentorsMap[
-          studentId
-        ].includes(mentorId)
-      ) {
-        studentToMentorsMap[
-          studentId
-        ].push(mentorId);
+      if (!studentToMentorsMap[studentId].includes(mentorId)) {
+        studentToMentorsMap[studentId].push(mentorId);
       }
 
-      allAssignedStudentUserIds.add(
-        studentId
-      );
+      allAssignedStudentUserIds.add(studentId);
     }
 
-    // ========================================================
-    // 4. GET STUDENTS WITHOUT LEETCODE PROFILE
-    // ========================================================
+    // --------------------------------------------------------
+    // 4. GET STUDENT PROFILES
+    // --------------------------------------------------------
 
-    const {
-      data: allStudentProfiles,
-      error: profilesError,
-    } = await supabaseAdmin
-      .from("profiles")
-      .select(
-        "user_id, name, kalvium_email, leetcode"
-      )
-      .in(
-        "user_id",
-        Array.from(
-          allAssignedStudentUserIds
-        )
-      );
+    const { data: allStudentProfiles, error: profilesError } =
+      await supabaseAdmin
+        .from("profiles")
+        .select("user_id, name, kalvium_email, leetcode")
+        .in("user_id", Array.from(allAssignedStudentUserIds));
 
     if (profilesError) {
       throw profilesError;
     }
 
-    const missingProfileStudents =
-      (allStudentProfiles || []).filter(
-        (profile) =>
-          !profile.leetcode ||
-          profile.leetcode.trim() === ""
-      );
-
-    console.log(
-      `[EMAIL SYSTEM] Students without LeetCode profile: ${missingProfileStudents.length}`
+    const missingProfileStudents = (allStudentProfiles || []).filter(
+      (profile) => !profile.leetcode || profile.leetcode.trim() === "",
     );
 
-    // ========================================================
-    // 5. FIND ALL MENTORS WHO NEED NOTIFICATION
-    // ========================================================
+    console.log(
+      `[EMAIL SYSTEM] Students without LeetCode profile: ${missingProfileStudents.length}`,
+    );
 
-    const mentorIdsToNotify =
-      new Set();
+    // --------------------------------------------------------
+    // 5. MENTORS TO NOTIFY
+    // --------------------------------------------------------
 
-    // Inactive students
-    for (
-      const record of
-        inactiveRecords || []
-    ) {
-      const mentorIds =
-        studentToMentorsMap[
-          record.user_id
-        ] || [];
+    const mentorIdsToNotify = new Set();
 
-      for (
-        const mentorId of mentorIds
-      ) {
-        mentorIdsToNotify.add(
-          mentorId
-        );
+    for (const record of inactiveRecords || []) {
+      const mentorIds = studentToMentorsMap[record.user_id] || [];
+
+      for (const mentorId of mentorIds) {
+        mentorIdsToNotify.add(mentorId);
       }
     }
 
-    // Students without LeetCode URL
-    for (
-      const student of
-        missingProfileStudents
-    ) {
-      const mentorIds =
-        studentToMentorsMap[
-          student.user_id
-        ] || [];
+    for (const student of missingProfileStudents) {
+      const mentorIds = studentToMentorsMap[student.user_id] || [];
 
-      for (
-        const mentorId of mentorIds
-      ) {
-        mentorIdsToNotify.add(
-          mentorId
-        );
+      for (const mentorId of mentorIds) {
+        mentorIdsToNotify.add(mentorId);
       }
     }
 
-    if (
-      mentorIdsToNotify.size === 0
-    ) {
-      console.log(
-        "[EMAIL SYSTEM] No mentors require notification."
-      );
+    if (mentorIdsToNotify.size === 0) {
+      console.log("[EMAIL SYSTEM] No mentors require notification.");
 
       return;
     }
 
-    // ========================================================
-    // 6. GET MENTOR DETAILS FROM SUPABASE AUTH
-    // ========================================================
+    // --------------------------------------------------------
+    // 6. GET MENTOR PROFILES
+    // --------------------------------------------------------
+
+    const { data: mentorProfiles, error: mentorError } = await supabaseAdmin
+      .from("profiles")
+      .select("user_id, name, kalvium_email")
+      .in("user_id", Array.from(mentorIdsToNotify));
+
+    if (mentorError) {
+      throw mentorError;
+    }
 
     const mentorDataMap = {};
 
-    await Promise.all(
-      Array.from(mentorIdsToNotify).map(async (mentorId) => {
-        try {
-          const { data, error } =
-            await supabaseAdmin.auth.admin.getUserById(mentorId);
+    for (const mentor of mentorProfiles || []) {
+      mentorDataMap[mentor.user_id] = mentor;
+    }
 
-          if (error) {
-            console.error(
-              `[EMAIL ERROR] Failed to fetch auth user for mentor ID ${mentorId}:`,
-              error.message
-            );
-            return;
-          }
-
-          if (data?.user) {
-            mentorDataMap[mentorId] = {
-              user_id: mentorId,
-              name:
-                data.user.user_metadata?.name ||
-                data.user.user_metadata?.full_name ||
-                "Mentor",
-              email: data.user.email,
-            };
-          }
-        } catch (err) {
-          console.error(
-            `[EMAIL ERROR] Exception fetching mentor ID ${mentorId}:`,
-            err.message
-          );
-        }
-      })
-    );
-
-    // ========================================================
-    // 7. GROUP DATA BY MENTOR
-    // ========================================================
+    // --------------------------------------------------------
+    // 7. GROUP BY MENTOR
+    // --------------------------------------------------------
 
     const groupedByMentor = {};
 
-    const nowMs =
-      Date.now();
+    const nowMs = Date.now();
 
-    const ONE_DAY_MS =
-      24 *
-      60 *
-      60 *
-      1000;
+    const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
-    // --------------------------------------------------------
-    // INACTIVE STUDENTS
-    // --------------------------------------------------------
+    for (const record of inactiveRecords || []) {
+      const assignedMentors = studentToMentorsMap[record.user_id] || [];
 
-    for (
-      const record of
-        inactiveRecords || []
-    ) {
-      const assignedMentors =
-        studentToMentorsMap[
-          record.user_id
-        ] || [];
+      const lastSolvedDate = record.last_solved_at
+        ? new Date(record.last_solved_at)
+        : null;
 
-      const lastSolvedDate =
-        record.last_solved_at
-          ? new Date(
-              record.last_solved_at
-            )
-          : null;
+      const daysInactive = lastSolvedDate
+        ? Math.floor((nowMs - lastSolvedDate.getTime()) / ONE_DAY_MS)
+        : null;
 
-      const daysInactive =
-        lastSolvedDate
-          ? Math.floor(
-              (nowMs -
-                lastSolvedDate.getTime()) /
-                ONE_DAY_MS
-            )
-          : null;
+      const studentProfile = (allStudentProfiles || []).find(
+        (profile) => profile.user_id === record.user_id,
+      );
 
       const student = {
-        userId:
-          record.user_id,
+        userId: record.user_id,
 
-        name:
-          record.profiles?.name ||
-          "Student",
+        name: studentProfile?.name || "Student",
 
-        email:
-          record.profiles?.kalvium_email ||
-          "Unknown",
+        email: studentProfile?.kalvium_email || "Unknown",
 
-        lastSolved:
-          lastSolvedDate
-            ? lastSolvedDate.toLocaleDateString()
-            : "Never / Unknown",
+        lastSolved: lastSolvedDate
+          ? lastSolvedDate.toLocaleDateString()
+          : "Never / Unknown",
 
-        daysInactive:
-          daysInactive !== null
-            ? daysInactive
-            : "Unknown",
+        daysInactive: daysInactive !== null ? daysInactive : "Unknown",
       };
 
-      for (
-        const mentorId of
-          assignedMentors
-      ) {
-        const mentor =
-          mentorDataMap[
-            mentorId
-          ];
+      for (const mentorId of assignedMentors) {
+        const mentor = mentorDataMap[mentorId];
 
-        if (!mentor) {
-          continue;
-        }
+        if (!mentor) continue;
 
-        const mentorEmail =
-          mentor.email;
+        const mentorEmail = mentor.kalvium_email;
 
-        if (!mentorEmail) {
-          continue;
-        }
+        if (!mentorEmail) continue;
 
-        if (
-          !groupedByMentor[
-            mentorEmail
-          ]
-        ) {
-          groupedByMentor[
-            mentorEmail
-          ] = {
-            mentorName:
-              mentor.name ||
-              "Mentor",
+        if (!groupedByMentor[mentorEmail]) {
+          groupedByMentor[mentorEmail] = {
+            mentorName: mentor.name || "Mentor",
 
-            sevenDaysPlus:
-              [],
+            sevenDaysPlus: [],
 
-            oneToSixDays:
-              [],
+            oneToSixDays: [],
 
-            missingProfile:
-              [],
+            missingProfile: [],
           };
         }
 
-        if (
-          daysInactive === null ||
-          daysInactive >= 7
-        ) {
-          groupedByMentor[
-            mentorEmail
-          ].sevenDaysPlus.push(
-            student
-          );
+        if (daysInactive === null || daysInactive >= 7) {
+          groupedByMentor[mentorEmail].sevenDaysPlus.push(student);
         } else {
-          groupedByMentor[
-            mentorEmail
-          ].oneToSixDays.push(
-            student
-          );
+          groupedByMentor[mentorEmail].oneToSixDays.push(student);
         }
       }
     }
 
     // --------------------------------------------------------
-    // MISSING LEETCODE PROFILE
+    // 8. MISSING PROFILE
     // --------------------------------------------------------
 
-    for (
-      const student of
-        missingProfileStudents
-    ) {
-      const assignedMentors =
-        studentToMentorsMap[
-          student.user_id
-        ] || [];
+    for (const student of missingProfileStudents) {
+      const assignedMentors = studentToMentorsMap[student.user_id] || [];
 
-      for (
-        const mentorId of
-          assignedMentors
-      ) {
-        const mentor =
-          mentorDataMap[
-            mentorId
-          ];
+      for (const mentorId of assignedMentors) {
+        const mentor = mentorDataMap[mentorId];
 
-        if (!mentor) {
-          continue;
-        }
+        if (!mentor) continue;
 
-        const mentorEmail =
-          mentor.email;
+        const mentorEmail = mentor.kalvium_email;
 
-        if (!mentorEmail) {
-          continue;
-        }
+        if (!mentorEmail) continue;
 
-        if (
-          !groupedByMentor[
-            mentorEmail
-          ]
-        ) {
-          groupedByMentor[
-            mentorEmail
-          ] = {
-            mentorName:
-              mentor.name ||
-              "Mentor",
+        if (!groupedByMentor[mentorEmail]) {
+          groupedByMentor[mentorEmail] = {
+            mentorName: mentor.name || "Mentor",
 
-            sevenDaysPlus:
-              [],
+            sevenDaysPlus: [],
 
-            oneToSixDays:
-              [],
+            oneToSixDays: [],
 
-            missingProfile:
-              [],
+            missingProfile: [],
           };
         }
 
-        const alreadyExists =
-          groupedByMentor[
-            mentorEmail
-          ].missingProfile.some(
-            (item) =>
-              item.userId ===
-              student.user_id
-          );
+        const alreadyExists = groupedByMentor[mentorEmail].missingProfile.some(
+          (item) => item.userId === student.user_id,
+        );
 
         if (!alreadyExists) {
-          groupedByMentor[
-            mentorEmail
-          ].missingProfile.push({
-            userId:
-              student.user_id,
+          groupedByMentor[mentorEmail].missingProfile.push({
+            userId: student.user_id,
 
-            name:
-              student.name ||
-              "Student",
+            name: student.name || "Student",
 
-            email:
-              student.kalvium_email ||
-              "Unknown",
+            email: student.kalvium_email || "Unknown",
           });
         }
       }
     }
 
-    // ========================================================
-    // 8. SEND EMAILS
-    // ========================================================
+    // --------------------------------------------------------
+    // 9. SEND EMAILS
+    // --------------------------------------------------------
 
-    for (
-      const [
-        mentorEmail,
-        data,
-      ] of Object.entries(
-        groupedByMentor
-      )
-    ) {
-      const renderList =
-        (students) =>
-          students
-            .map(
-              (student) => `
+    for (const [mentorEmail, data] of Object.entries(groupedByMentor)) {
+      const renderList = (students) =>
+        students
+          .map(
+            (student) => `
                 <li>
-                  <strong>
-                    ${student.name}
-                  </strong>
+                  <strong>${student.name}</strong>
                   (${student.email})
                   — Last active:
                   ${student.lastSolved}
                   (${student.daysInactive}
                   days inactive)
                 </li>
-              `
-            )
-            .join("");
+              `,
+          )
+          .join("");
 
-      const renderMissingList =
-        (students) =>
-          students
-            .map(
-              (student) => `
+      const renderMissingList = (students) =>
+        students
+          .map(
+            (student) => `
                 <li>
-                  <strong>
-                    ${student.name}
-                  </strong>
+                  <strong>${student.name}</strong>
                   (${student.email})
                   — <em>
                     LeetCode profile URL not set
                   </em>
                 </li>
-              `
-            )
-            .join("");
+              `,
+          )
+          .join("");
 
-      const sevenDaysHtml =
-        data.sevenDaysPlus.length
-          ? `<ul>${renderList(
-              data.sevenDaysPlus
-            )}</ul>`
-          : `<p><em>
+      const sevenDaysHtml = data.sevenDaysPlus.length
+        ? `<ul>${renderList(data.sevenDaysPlus)}</ul>`
+        : `<p><em>
               No students inactive for 7+ days.
             </em></p>`;
 
-      const oneToSixDaysHtml =
-        data.oneToSixDays.length
-          ? `<ul>${renderList(
-              data.oneToSixDays
-            )}</ul>`
-          : `<p><em>
+      const oneToSixDaysHtml = data.oneToSixDays.length
+        ? `<ul>${renderList(data.oneToSixDays)}</ul>`
+        : `<p><em>
               No students inactive in the 1–6 day window.
             </em></p>`;
 
-      const missingProfileHtml =
-        data.missingProfile.length
-          ? `<ul>${renderMissingList(
-              data.missingProfile
-            )}</ul>`
-          : `<p><em>
+      const missingProfileHtml = data.missingProfile.length
+        ? `<ul>${renderMissingList(data.missingProfile)}</ul>`
+        : `<p><em>
               All assigned squad members have configured their LeetCode profiles.
             </em></p>`;
 
@@ -1595,57 +1282,42 @@ async function notifyMentorsAboutInactiveStudents() {
         continue;
       }
 
-      const testEmail =
-        process.env.TEST_EMAIL?.trim();
+      const testEmail = process.env.TEST_EMAIL?.trim();
 
-      const recipientEmail =
-        testEmail ||
-        mentorEmail;
+      const recipientEmail = testEmail || mentorEmail;
 
-      console.log(
-        `[EMAIL SYSTEM] Sending report to ${recipientEmail}`
-      );
+      console.log(`[EMAIL SYSTEM] Sending report to ${recipientEmail}`);
 
-      const response =
-        await fetch(
-          "https://api.brevo.com/v3/smtp/email",
-          {
-            method: "POST",
+      const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
 
-            headers: {
-              accept:
-                "application/json",
+        headers: {
+          accept: "application/json",
 
-              "content-type":
-                "application/json",
+          "content-type": "application/json",
 
-              "api-key":
-                process.env.BREVO_API_KEY,
+          "api-key": process.env.BREVO_API_KEY,
+        },
+
+        body: JSON.stringify({
+          sender: {
+            name: "Kalvium Portfolio Management",
+
+            email: "kpm-squad@googlegroups.com",
+          },
+
+          to: [
+            {
+              email: recipientEmail,
+
+              name: data.mentorName,
             },
+          ],
 
-            body: JSON.stringify({
-              sender: {
-                name:
-                  "Kalvium Portfolio Management",
+          subject:
+            "[KPM Report] - Daily Report: Squad(s) LeetCode Inactivity & Setup Summary",
 
-                email:
-                  "kpm-squad@googlegroups.com",
-              },
-
-              to: [
-                {
-                  email:
-                    recipientEmail,
-
-                  name:
-                    data.mentorName,
-                },
-              ],
-
-              subject:
-                "[KPM Report] - Daily Report: Squad(s) LeetCode Inactivity & Setup Summary",
-
-              htmlContent: `
+          htmlContent: `
                 <h3>
                   Hello ${data.mentorName},
                 </h3>
@@ -1690,40 +1362,32 @@ async function notifyMentorsAboutInactiveStudents() {
                   Kalvium Portfolio Management
                 </p>
               `,
-            }),
-          }
-        );
+        }),
+      });
 
       if (!response.ok) {
         let errorData;
 
         try {
-          errorData =
-            await response.json();
+          errorData = await response.json();
         } catch {
-          errorData =
-            await response.text();
+          errorData = await response.text();
         }
 
         console.error(
           `[EMAIL ERROR] Brevo API failed for ${recipientEmail}:`,
-          errorData
+          errorData,
         );
       } else {
         console.log(
-          `[EMAIL SENT] ${recipientEmail} | ${totalCount} student updates`
+          `[EMAIL SENT] ${recipientEmail} | ${totalCount} student updates`,
         );
       }
     }
 
-    console.log(
-      "[EMAIL SYSTEM] Finished notifications."
-    );
+    console.log("[EMAIL SYSTEM] Finished notifications.");
   } catch (error) {
-    console.error(
-      "[EMAIL SYSTEM ERROR]",
-      error
-    );
+    console.error("[EMAIL SYSTEM ERROR]", error);
   }
 }
 
@@ -1735,77 +1399,45 @@ async function syncSingleLeetCodeProfile(
   profileId,
   userId,
   rawLeetCodeUrl,
-  maxRetries = MAX_RETRIES
+  maxRetries = MAX_RETRIES,
 ) {
-  const username =
-    extractUsername(
-      rawLeetCodeUrl
-    );
+  const username = extractUsername(rawLeetCodeUrl);
 
-  console.log(
-    "\n┌──────────────────────────────────────────────"
-  );
+  console.log("\n============================================================");
 
-  console.log(
-    "│ SYNC PROFILE"
-  );
+  console.log("[SYNC PROFILE]");
 
-  console.log(
-    "├──────────────────────────────────────────────"
-  );
+  console.log(`Profile ID : ${profileId}`);
 
-  console.log(
-    `│ Profile ID : ${profileId}`
-  );
+  console.log(`User ID    : ${userId}`);
 
-  console.log(
-    `│ User ID    : ${userId}`
-  );
+  console.log(`Raw URL    : ${rawLeetCodeUrl}`);
 
-  console.log(
-    `│ Raw URL    : ${rawLeetCodeUrl}`
-  );
+  console.log(`Username   : ${username}`);
 
-  console.log(
-    `│ Username   : ${username}`
-  );
+  console.log("============================================================");
 
-  console.log(
-    "└──────────────────────────────────────────────"
-  );
+  // ----------------------------------------------------------
+  // VALIDATE USERNAME
+  // ----------------------------------------------------------
 
-  // ========================================================
-  // VALIDATE
-  // ========================================================
-
-  if (
-    !username ||
-    !isValidLeetCodeUsername(
-      username
-    )
-  ) {
-    console.warn(
-      "[INVALID LEETCODE USERNAME]",
-      {
-        profileId,
-        rawLeetCodeUrl,
-        username,
-      }
-    );
+  if (!username || !isValidLeetCodeUsername(username)) {
+    console.warn("[INVALID LEETCODE USERNAME]", {
+      profileId,
+      rawLeetCodeUrl,
+      username,
+    });
 
     return {
-      status:
-        "INVALID_URL",
+      status: "INVALID_URL",
 
-      username:
-        username ||
-        rawLeetCodeUrl,
+      username: username || rawLeetCodeUrl,
     };
   }
 
-  // ========================================================
-  // GRAPHQL
-  // ========================================================
+  // ----------------------------------------------------------
+  // GRAPHQL QUERY
+  // ----------------------------------------------------------
 
   const query = `
     query getUserStats(
@@ -1841,302 +1473,211 @@ async function syncSingleLeetCodeProfile(
     }
   `;
 
-  // ========================================================
+  // ----------------------------------------------------------
   // RETRIES
-  // ========================================================
+  // ----------------------------------------------------------
 
-  for (
-    let attempt = 1;
-    attempt <= maxRetries;
-    attempt++
-  ) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      console.log(
-        `[LEETCODE] ${username} | Request ${attempt}/${maxRetries}`
-      );
+      console.log(`[LEETCODE] ${username} | Request ${attempt}/${maxRetries}`);
 
-      const response =
-        await fetch(
-          LEETCODE_GRAPHQL_URL,
-          {
-            method: "POST",
+      const response = await fetch(LEETCODE_GRAPHQL_URL, {
+        method: "POST",
 
-            headers: {
-              "Content-Type":
-                "application/json",
+        headers: {
+          "Content-Type": "application/json",
 
-              Referer:
-                "https://leetcode.com",
+          Referer: "https://leetcode.com",
 
-              "User-Agent":
-                "Mozilla/5.0",
-            },
+          "User-Agent": "Mozilla/5.0",
+        },
 
-            body: JSON.stringify({
-              query,
+        body: JSON.stringify({
+          query,
 
-              variables: {
-                username,
-              },
-            }),
-          }
-        );
+          variables: {
+            username,
+          },
+        }),
+      });
 
-      console.log(
-        `[LEETCODE RESPONSE] ${username} | HTTP ${response.status}`
-      );
+      console.log(`[LEETCODE RESPONSE] ${username} | HTTP ${response.status}`);
 
-      // ====================================================
+      // ------------------------------------------------------
       // RATE LIMIT / SERVER ERROR
-      // ====================================================
+      // ------------------------------------------------------
 
-      if (
-        response.status ===
-          429 ||
-        response.status >= 500
-      ) {
-        const backoffTime =
-          attempt * 5000;
+      if (response.status === 429 || response.status >= 500) {
+        const backoffTime = attempt * 5000;
 
-        console.warn(
-          `[LEETCODE RETRY] ${username} | Waiting ${backoffTime}ms`
-        );
+        console.warn(`[LEETCODE RETRY] ${username} | Waiting ${backoffTime}ms`);
 
-        await delay(
-          backoffTime
-        );
-
-        continue;
-      }
-
-      // ====================================================
-      // HTTP ERROR
-      // ====================================================
-
-      if (!response.ok) {
-        return {
-          status:
-            "HTTP_ERROR",
-
-          username,
-
-          httpCode:
-            response.status,
-        };
-      }
-
-      const result =
-        await response.json();
-
-      // ====================================================
-      // GRAPHQL ERROR
-      // ====================================================
-
-      if (result.errors) {
-        const errorMessage =
-          result.errors[0]
-            ?.message ||
-          "Unknown GraphQL error";
-
-        console.error(
-          `[LEETCODE GRAPHQL ERROR] ${username}`,
-          result.errors
-        );
-
-        const isRateLimited =
-          result.errors.some(
-            (error) =>
-              error.message
-                ?.toLowerCase()
-                .includes("rate") ||
-              error.message
-                ?.toLowerCase()
-                .includes(
-                  "many requests"
-                )
-          );
-
-        if (
-          isRateLimited &&
-          attempt < maxRetries
-        ) {
-          await delay(
-            attempt * 5000
-          );
+        if (attempt < maxRetries) {
+          await delay(backoffTime);
 
           continue;
         }
 
         return {
-          status:
-            "GRAPHQL_ERROR",
+          status: "HTTP_ERROR",
 
           username,
 
-          error:
-            errorMessage,
-
-          details:
-            result.errors,
+          httpCode: response.status,
         };
       }
 
-      // ====================================================
-      // USER
-      // ====================================================
+      // ------------------------------------------------------
+      // HTTP ERROR
+      // ------------------------------------------------------
 
-      const matchedUser =
-        result?.data
-          ?.matchedUser;
+      if (!response.ok) {
+        return {
+          status: "HTTP_ERROR",
 
-      if (!matchedUser) {
-        console.warn(
-          `[LEETCODE USER NOT FOUND] ${username}`
+          username,
+
+          httpCode: response.status,
+        };
+      }
+
+      // ------------------------------------------------------
+      // PARSE RESPONSE
+      // ------------------------------------------------------
+
+      const result = await response.json();
+
+      // ------------------------------------------------------
+      // GRAPHQL ERROR
+      // ------------------------------------------------------
+
+      if (result.errors) {
+        console.error(`[LEETCODE GRAPHQL ERROR] ${username}`, result.errors);
+
+        const errorMessage =
+          result.errors[0]?.message || "Unknown GraphQL error";
+
+        const isRateLimited = result.errors.some(
+          (error) =>
+            error.message?.toLowerCase().includes("rate") ||
+            error.message?.toLowerCase().includes("many requests"),
         );
 
+        if (isRateLimited && attempt < maxRetries) {
+          await delay(attempt * 5000);
+
+          continue;
+        }
+
         return {
-          status:
-            "NOT_FOUND",
+          status: "GRAPHQL_ERROR",
+
+          username,
+
+          error: errorMessage,
+
+          details: result.errors,
+        };
+      }
+
+      // ------------------------------------------------------
+      // USER
+      // ------------------------------------------------------
+
+      const matchedUser = result?.data?.matchedUser;
+
+      if (!matchedUser) {
+        console.warn(`[LEETCODE USER NOT FOUND] ${username}`);
+
+        return {
+          status: "NOT_FOUND",
 
           username,
         };
       }
 
-      // ====================================================
+      // ------------------------------------------------------
       // STATS
-      // ====================================================
+      // ------------------------------------------------------
 
-      const submitStats =
-        matchedUser
-          .submitStatsGlobal
-          ?.acSubmissionNum ||
-        [];
+      const submitStats = matchedUser.submitStatsGlobal?.acSubmissionNum || [];
 
       const totalSolved =
-        submitStats.find(
-          (item) =>
-            item.difficulty ===
-            "All"
-        )?.count || 0;
+        submitStats.find((item) => item.difficulty === "All")?.count || 0;
 
       const easySolved =
-        submitStats.find(
-          (item) =>
-            item.difficulty ===
-            "Easy"
-        )?.count || 0;
+        submitStats.find((item) => item.difficulty === "Easy")?.count || 0;
 
       const mediumSolved =
-        submitStats.find(
-          (item) =>
-            item.difficulty ===
-            "Medium"
-        )?.count || 0;
+        submitStats.find((item) => item.difficulty === "Medium")?.count || 0;
 
       const hardSolved =
-        submitStats.find(
-          (item) =>
-            item.difficulty ===
-            "Hard"
-        )?.count || 0;
+        submitStats.find((item) => item.difficulty === "Hard")?.count || 0;
 
-      const ranking =
-        matchedUser.profile
-          ?.ranking || 0;
+      const ranking = matchedUser.profile?.ranking || 0;
 
-      const score =
-        easySolved +
-        mediumSolved * 1.5 +
-        hardSolved * 2;
+      // Easy = 1
+      // Medium = 1.5
+      // Hard = 2
 
-      console.log(
-        "\n[LEETCODE STATS]"
-      );
+      const score = easySolved + mediumSolved * 1.5 + hardSolved * 2;
 
-      console.log(
-        `   Username : ${matchedUser.username}`
-      );
+      console.log("\n[LEETCODE STATS]");
 
-      console.log(
-        `   Total    : ${totalSolved}`
-      );
+      console.log(`Username : ${matchedUser.username}`);
 
-      console.log(
-        `   Easy     : ${easySolved}`
-      );
+      console.log(`Total    : ${totalSolved}`);
 
-      console.log(
-        `   Medium   : ${mediumSolved}`
-      );
+      console.log(`Easy     : ${easySolved}`);
 
-      console.log(
-        `   Hard     : ${hardSolved}`
-      );
+      console.log(`Medium   : ${mediumSolved}`);
 
-      console.log(
-        `   Score    : ${score}`
-      );
+      console.log(`Hard     : ${hardSolved}`);
 
-      // ====================================================
+      console.log(`Score    : ${score}`);
+
+      // ------------------------------------------------------
       // RECENT SUBMISSIONS
-      // ====================================================
+      // ------------------------------------------------------
 
-      const recentSubmissions =
-        result?.data
-          ?.recentAcSubmissionList ||
-        [];
+      const recentSubmissions = result?.data?.recentAcSubmissionList || [];
 
-      let lastSolvedAt =
-        null;
+      let lastSolvedAt = null;
 
-      if (
-        recentSubmissions.length >
-          0 &&
-        recentSubmissions[0]
-          ?.timestamp
-      ) {
-        const unixSec =
-          Number(
-            recentSubmissions[0]
-              .timestamp
-          );
+      if (recentSubmissions.length > 0 && recentSubmissions[0]?.timestamp) {
+        const unixSec = Number(recentSubmissions[0].timestamp);
 
-        if (
-          !Number.isNaN(
-            unixSec
-          ) &&
-          unixSec > 0
-        ) {
-          lastSolvedAt =
-            new Date(
-              unixSec * 1000
-            ).toISOString();
+        if (!Number.isNaN(unixSec) && unixSec > 0) {
+          lastSolvedAt = new Date(unixSec * 1000).toISOString();
         }
       }
 
-      // ============================================================
+      // ------------------------------------------------------
       // SAVE SUBMISSIONS
-      // ============================================================
+      // ------------------------------------------------------
 
-      await saveLeetCodeSubmissions(
+      const submissionResult = await saveLeetCodeSubmissions(
         userId,
         matchedUser.username,
-        recentSubmissions
+        recentSubmissions,
       );
 
-      // ============================================================
+      if (!submissionResult.success) {
+        console.warn(
+          `[SUBMISSIONS WARNING] ${username} | Failed to save submissions`,
+        );
+      }
+
+      // ------------------------------------------------------
       // FALLBACK LAST SOLVED
-      // ============================================================
+      // ------------------------------------------------------
 
       if (!lastSolvedAt) {
         console.log(
-          `[DB LOOKUP] Checking existing last_solved_at for ${username}`
+          `[DB LOOKUP] Checking existing last_solved_at for ${username}`,
         );
 
-        const {
-          data: existingData,
-          error: existingError,
-        } = await supabaseAdmin
+        const { data: existingData, error: existingError } = await supabaseAdmin
           .from("leetcode_leaderboard")
           .select("last_solved_at")
           .eq("profile_id", profileId)
@@ -2149,71 +1690,62 @@ async function syncSingleLeetCodeProfile(
             {
               profileId,
               username,
-            }
+            },
           );
         }
 
-        lastSolvedAt =
-          existingData?.last_solved_at || null;
+        lastSolvedAt = existingData?.last_solved_at || null;
       }
 
-      // ============================================================
+      // ------------------------------------------------------
       // ACTIVE STATUS
-      // ============================================================
+      // ------------------------------------------------------
 
-      const ONE_DAY_MS =
-        24 * 60 * 60 * 1000;
+      const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+      const lastSolvedTime = lastSolvedAt
+        ? new Date(lastSolvedAt).getTime()
+        : NaN;
 
       const isLeetCodeActive =
-        lastSolvedAt
-          ? Date.now() -
-              new Date(lastSolvedAt).getTime() <=
-            ONE_DAY_MS
-          : false;
+        Number.isFinite(lastSolvedTime) &&
+        Date.now() - lastSolvedTime <= ONE_DAY_MS;
 
-      // ============================================================
-      // CHECK PENDING CHEAT REVIEWS
-      // ============================================================
+      // ------------------------------------------------------
+      // CHECK PENDING REVIEWS
+      // ------------------------------------------------------
 
       console.log(
-        `[SUSPENSION CHECK] ${username} | Checking pending reviews...`
+        `[SUSPENSION CHECK] ${username} | Checking pending reviews...`,
       );
 
-      const {
-        data: pendingReviews,
-        error: pendingReviewError,
-      } = await supabaseAdmin
-        .from("leetcode_submissions")
-        .select("id")
-        .eq("user_id", userId)
-        .eq("review_status", "pending")
-        .limit(1);
+      const { data: pendingReviews, error: pendingReviewError } =
+        await supabaseAdmin
+          .from("leetcode_submissions")
+          .select("id")
+          .eq("user_id", userId)
+          .eq("review_status", "pending")
+          .limit(1);
 
       if (pendingReviewError) {
-        logSupabaseError(
-          "Checking pending reviews",
-          pendingReviewError,
-          {
-            userId,
-            profileId,
-            username,
-          }
-        );
+        logSupabaseError("Checking pending reviews", pendingReviewError, {
+          userId,
+          profileId,
+          username,
+        });
 
+        // Do not accidentally unsuspend.
         return {
           status: "DB_ERROR",
+
           username,
+
           error: pendingReviewError.message,
         };
       }
 
       const hasPendingReviews =
-        Array.isArray(pendingReviews) &&
-        pendingReviews.length > 0;
-
-      // ============================================================
-      // SUSPENSION STATUS
-      // ============================================================
+        Array.isArray(pendingReviews) && pendingReviews.length > 0;
 
       const isSuspended = hasPendingReviews;
 
@@ -2223,95 +1755,72 @@ async function syncSingleLeetCodeProfile(
 
       console.log(
         `[LEADERBOARD STATUS] ${username} | ` +
-          `pending reviews: ${hasPendingReviews} | ` +
-          `suspended: ${isSuspended}`
+          `pending=${hasPendingReviews} | ` +
+          `suspended=${isSuspended}`,
       );
 
-      // ============================================================
+      // ------------------------------------------------------
       // LEADERBOARD UPSERT
-      // ============================================================
+      // ------------------------------------------------------
 
       const upsertPayload = {
         profile_id: profileId,
 
         user_id: userId,
 
-        leetcode_username:
-          matchedUser.username,
+        leetcode_username: matchedUser.username,
 
-        easy_solved:
-          easySolved,
+        easy_solved: easySolved,
 
-        medium_solved:
-          mediumSolved,
+        medium_solved: mediumSolved,
 
-        hard_solved:
-          hardSolved,
+        hard_solved: hardSolved,
 
-        total_solved:
-          totalSolved,
+        total_solved: totalSolved,
 
         ranking,
 
         score,
 
-        updated_at:
-          new Date().toISOString(),
+        updated_at: new Date().toISOString(),
 
-        last_solved_at:
-          lastSolvedAt,
+        last_solved_at: lastSolvedAt,
 
-        is_leetcode_active:
-          isLeetCodeActive,
+        is_leetcode_active: isLeetCodeActive,
 
-        is_suspended:
-          isSuspended,
+        is_suspended: isSuspended,
 
-        suspension_reason:
-          suspensionReason,
+        suspension_reason: suspensionReason,
       };
 
-      console.log(
-        `[DB UPSERT] ${username} | Updating leetcode_leaderboard...`
-      );
+      console.log(`[DB UPSERT] ${username} | Updating leetcode_leaderboard...`);
 
       console.log(
         `[DB UPSERT STATUS] ${username} | ` +
           `is_suspended=${isSuspended} | ` +
-          `reason=${suspensionReason || "none"}`
+          `reason=${suspensionReason || "none"}`,
       );
 
-      const {
-        data: savedData,
-        error: dbError,
-      } = await supabaseAdmin
+      const { data: savedData, error: dbError } = await supabaseAdmin
         .from("leetcode_leaderboard")
-        .upsert(
-          upsertPayload,
-          {
-            onConflict: "profile_id",
-          }
-        )
+        .upsert(upsertPayload, {
+          onConflict: "profile_id",
+        })
         .select()
         .single();
 
       if (dbError) {
-        logSupabaseError(
-          "Leaderboard upsert failed",
-          dbError,
-          {
-            profileId,
-            userId,
-            username,
-            isSuspended,
-            suspensionReason,
-          }
-        );
+        logSupabaseError("Leaderboard upsert failed", dbError, {
+          profileId,
+          userId,
+          username,
+          isSuspended,
+          suspensionReason,
+        });
 
         if (attempt < maxRetries) {
           console.log(
-            `[DB RETRY] ${username} | ` +
-              `Retrying leaderboard upsert...`
+            `[DB RETRY] ${username} | Retrying leaderboard upsert...`,
           );
 
           await delay(2000);
@@ -2324,280 +1833,205 @@ async function syncSingleLeetCodeProfile(
 
           username,
 
-          error:
-            dbError.message,
+          error: dbError.message,
         };
       }
 
-      // ============================================================
-      // VERIFY THE DATABASE UPDATE
-      // ============================================================
+      // ------------------------------------------------------
+      // VERIFY DATABASE
+      // ------------------------------------------------------
 
-      const {
-        data: verifiedLeaderboard,
-        error: verifyError,
-      } = await supabaseAdmin
-        .from("leetcode_leaderboard")
-        .select(`
+      const { data: verifiedLeaderboard, error: verifyError } =
+        await supabaseAdmin
+          .from("leetcode_leaderboard")
+          .select(
+            `
           profile_id,
           user_id,
           leetcode_username,
           score,
           is_suspended,
           suspension_reason
-        `)
-        .eq("profile_id", profileId)
-        .maybeSingle();
+        `,
+          )
+          .eq("profile_id", profileId)
+          .maybeSingle();
 
       if (verifyError) {
-        logSupabaseError(
-          "Leaderboard verification failed",
-          verifyError,
-          {
-            profileId,
-            username,
-          }
-        );
+        logSupabaseError("Leaderboard verification failed", verifyError, {
+          profileId,
+          username,
+        });
       } else {
         console.log(
           `[DB VERIFY] ${username} | ` +
             `score=${verifiedLeaderboard?.score} | ` +
             `is_suspended=${verifiedLeaderboard?.is_suspended} | ` +
-            `reason=${
-              verifiedLeaderboard?.suspension_reason ||
-              "none"
-            }`
+            `reason=${verifiedLeaderboard?.suspension_reason || "none"}`,
         );
       }
-
-      // ============================================================
-      // SUCCESS
-      // ============================================================
 
       console.log(
         `[DB SUCCESS] ${username} | ` +
           `Score: ${score} | ` +
-          `Suspended: ${isSuspended}`
+          `Suspended: ${isSuspended}`,
       );
 
       return {
         status: "SUCCESS",
 
-        username:
-          matchedUser.username,
+        username: matchedUser.username,
 
-        isActive:
-          isLeetCodeActive,
+        isActive: isLeetCodeActive,
 
         score,
 
         isSuspended,
 
         suspensionReason,
+
+        saved: Boolean(savedData),
       };
-
     } catch (error) {
-      console.error(
-        `[SYNC EXCEPTION] ${username}`,
-        error.message
-      );
+      console.error(`[SYNC EXCEPTION] ${username}`, error.message);
 
-      if (
-        attempt <
-        maxRetries
-      ) {
-        await delay(
-          attempt * 3000
-        );
-      } else {
-        return {
-          status:
-            "NETWORK_ERROR",
+      if (attempt < maxRetries) {
+        await delay(attempt * 3000);
 
-          username,
-
-          error:
-            error.message,
-        };
+        continue;
       }
+
+      return {
+        status: "NETWORK_ERROR",
+
+        username,
+
+        error: error.message,
+      };
     }
   }
+
+  return {
+    status: "FAILED",
+
+    username,
+
+    error: "Maximum retry attempts exceeded",
+  };
 }
 
 // ============================================================
-// UPDATE LEADERBOARD
+// UPDATE LEETCODE LEADERBOARD
 // ============================================================
 
-router.post(
-  "/update-leetcode",
-  async (req, res) => {
+router.post("/update-leetcode", async (req, res) => {
+  // --------------------------------------------------------
+  // AUTH
+  // --------------------------------------------------------
 
-    // ========================================================
-    // AUTH
-    // ========================================================
+  const authHeader = req.headers.authorization;
 
-    const authHeader =
-      req.headers.authorization;
+  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+    console.error("[AUTH FAILED] Invalid CRON_SECRET");
 
-    if (
-      authHeader !==
-      `Bearer ${process.env.CRON_SECRET}`
-    ) {
-      console.error(
-        "[AUTH FAILED] Invalid CRON_SECRET"
-      );
-
-      return res.status(401).json({
-        error:
-          "Unauthorized",
-      });
-    }
-
-    console.log(
-      "[AUTH SUCCESS] Cron request authenticated."
-    );
-
-    // ========================================================
-    // RESPOND IMMEDIATELY
-    // ========================================================
-
-    res.status(200).json({
-      message:
-        "Leaderboard update process started in background.",
+    return res.status(401).json({
+      error: "Unauthorized",
     });
-
-    // ========================================================
-    // BACKGROUND PROCESS
-    // ========================================================
-
-    try {
-      let users = null;
-
-      let fetchError = null;
-
-      // ======================================================
-      // FETCH PROFILES
-      // ======================================================
-
-      for (
-        let attempt = 1;
-        attempt <= 3;
-        attempt++
-      ) {
-        const {
-          data,
-          error,
-        } = await supabaseAdmin
-          .from("profiles")
-          .select(
-            "id, user_id, leetcode"
-          )
-          .not(
-            "user_id",
-            "is",
-            null
-          )
-          .not(
-            "leetcode",
-            "is",
-            null
-          )
-          .neq(
-            "leetcode",
-            ""
-          );
-
-        if (!error) {
-          users = data;
-          break;
-        }
-
-        fetchError =
-          error;
-
-        logSupabaseError(
-          `Profiles fetch attempt ${attempt}`,
-          error
-        );
-
-        await delay(
-          2000
-        );
-      }
-
-      if (!users) {
-        console.error(
-          "[CRON FATAL] Unable to fetch profiles."
-        );
-
-        console.error(
-          fetchError
-        );
-
-        return;
-      }
-
-      console.log(
-        `[PROFILE FETCH SUCCESS] Found ${users.length} profiles.`
-      );
-
-      // ======================================================
-      // SYNC EVERY STUDENT
-      // ======================================================
-
-      for (
-        let index = 0;
-        index < users.length;
-        index++
-      ) {
-        const user =
-          users[index];
-
-        console.log(
-          `\n[SYNC PROGRESS] ${
-            index + 1
-          }/${users.length}`
-        );
-
-        await syncSingleLeetCodeProfile(
-          user.id,
-          user.user_id,
-          user.leetcode
-        );
-
-        await delay(
-          getRandomDelay()
-        );
-      }
-
-      // ======================================================
-      // SEND MENTOR EMAILS
-      // ======================================================
-
-      await notifyMentorsAboutInactiveStudents();
-
-      console.log(
-        `\nFinished: ${new Date().toISOString()}`
-      );
-
-      console.log(
-        "============================================================"
-      );
-    } catch (error) {
-      console.error(
-        "\n[CRON FATAL EXCEPTION]"
-      );
-
-      console.error({
-        message:
-          error.message,
-
-        stack:
-          error.stack,
-      });
-    }
   }
-);
+
+  console.log("[AUTH SUCCESS] Cron request authenticated.");
+
+  // --------------------------------------------------------
+  // RESPOND IMMEDIATELY
+  // --------------------------------------------------------
+
+  res.status(200).json({
+    message: "Leaderboard update process started in background.",
+  });
+
+  // --------------------------------------------------------
+  // BACKGROUND PROCESS
+  // --------------------------------------------------------
+
+  try {
+    let users = null;
+    let fetchError = null;
+
+    // ------------------------------------------------------
+    // FETCH PROFILES
+    // ------------------------------------------------------
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const { data, error } = await supabaseAdmin
+        .from("profiles")
+        .select("id, user_id, leetcode")
+        .not("user_id", "is", null)
+        .not("leetcode", "is", null)
+        .neq("leetcode", "");
+
+      if (!error) {
+        users = data;
+        break;
+      }
+
+      fetchError = error;
+
+      logSupabaseError(`Profiles fetch attempt ${attempt}`, error);
+
+      if (attempt < 3) {
+        await delay(2000);
+      }
+    }
+
+    if (!users) {
+      console.error("[CRON FATAL] Unable to fetch profiles.");
+
+      console.error(fetchError);
+
+      return;
+    }
+
+    console.log(`[PROFILE FETCH SUCCESS] Found ${users.length} profiles.`);
+
+    // ------------------------------------------------------
+    // SYNC EVERY STUDENT
+    // ------------------------------------------------------
+
+    for (let index = 0; index < users.length; index++) {
+      const user = users[index];
+
+      console.log(`\n[SYNC PROGRESS] ${index + 1}/${users.length}`);
+
+      const result = await syncSingleLeetCodeProfile(
+        user.id,
+        user.user_id,
+        user.leetcode,
+      );
+
+      console.log(`[SYNC RESULT] ${user.leetcode} | ${result.status}`);
+
+      await delay(getRandomDelay());
+    }
+
+    // ------------------------------------------------------
+    // SEND MENTOR EMAILS
+    // ------------------------------------------------------
+
+    await notifyMentorsAboutInactiveStudents();
+
+    console.log(`\nFinished: ${new Date().toISOString()}`);
+
+    console.log("============================================================");
+  } catch (error) {
+    console.error("\n[CRON FATAL EXCEPTION]");
+
+    console.error({
+      message: error.message,
+
+      stack: error.stack,
+    });
+  }
+});
 
 // ============================================================
 // EXPORT
