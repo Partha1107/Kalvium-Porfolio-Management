@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import "./Students.css";
-import { getAllStudents } from "../api/routes/Public/StudentInfo"; 
+import { getAllStudents } from "../api/routes/Public/StudentInfo";
 import { useNavigate } from "react-router-dom";
 
 function LazyAvatar({ src, alt }) {
@@ -48,11 +48,19 @@ export default function Students() {
   const itemsPerPage = 12;
 
   const [searchQuery, setSearchQuery] = useState("");
+  const [selectedSquad, setSelectedSquad] = useState("all");
+  const [sortOrder, setSortOrder] = useState("asc");
+
+  const availableSquads = Array.from(
+    new Set(studentsData.map((student) => student.squad_id).filter(Boolean))
+  ).sort((firstSquad, secondSquad) => Number(firstSquad) - Number(secondSquad));
 
   const filteredStudents = studentsData.filter((student) => {
     const query = searchQuery.toLowerCase();
+    const matchesSquad =
+      selectedSquad === "all" || String(student.squad_id) === selectedSquad;
 
-    return (
+    return matchesSquad && (
       student.name.toLowerCase().includes(query) ||
       student.role.toLowerCase().includes(query) ||
       (student.skills || []).some((skill) =>
@@ -61,12 +69,20 @@ export default function Students() {
     );
   });
 
-  const totalItems = filteredStudents.length;
+  const sortedStudents = [...filteredStudents].sort((firstStudent, secondStudent) => {
+    const nameComparison = firstStudent.name.localeCompare(secondStudent.name, undefined, {
+      sensitivity: "base",
+    });
+
+    return sortOrder === "asc" ? nameComparison : -nameComparison;
+  });
+
+  const totalItems = sortedStudents.length;
   const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
 
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = Math.min(startIndex + itemsPerPage, totalItems);
-  const currentStudents = filteredStudents.slice(startIndex, endIndex);
+  const currentStudents = sortedStudents.slice(startIndex, endIndex);
 
   const itemsToRenderCount = isLoading ? itemsPerPage : currentStudents.length;
 
@@ -83,14 +99,15 @@ export default function Students() {
 
         const formattedStudents = data.map((student) => ({
           user_id: student.user_id,
+          squad_id: student.squad_id,
           name: student.name || "Unknown",
           role: student.title || student.role || "Student",
           avatar:
             student.avatar_url && student.avatar_url.trim() !== ""
               ? student.avatar_url
               : `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                  student.name || "Student"
-                )}&background=0D8ABC&color=fff&size=256`,
+                student.name || "Student"
+              )}&background=0D8ABC&color=fff&size=256`,
 
           skills: [
             student.github ? "GitHub" : null,
@@ -118,7 +135,7 @@ export default function Students() {
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery]);
+  }, [searchQuery, selectedSquad, sortOrder]);
 
   const handlePageChange = (page) => {
     if (page >= 1 && page <= totalPages && page !== currentPage) {
@@ -222,10 +239,26 @@ export default function Students() {
             />
           </div>
           <div className="filters-row">
-            <select><option>All Domains</option></select>
-            <select><option>All Skills</option></select>
-            <select><option>All Batches</option></select>
-            <select><option>Sort by: A → Z</option></select>
+            <select
+              value={selectedSquad}
+              onChange={(event) => setSelectedSquad(event.target.value)}
+              aria-label="Filter students by squad ID"
+            >
+              <option value="all">All Squads</option>
+              {availableSquads.map((squadId) => (
+                <option key={squadId} value={String(squadId)}>
+                  Squad {squadId}
+                </option>
+              ))}
+            </select>
+            <select
+              value={sortOrder}
+              onChange={(event) => setSortOrder(event.target.value)}
+              aria-label="Sort students by name"
+            >
+              <option value="asc">Sort by: A → Z</option>
+              <option value="desc">Sort by: Z → A</option>
+            </select>
           </div>
         </div>
       </div>
