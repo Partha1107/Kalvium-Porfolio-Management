@@ -208,18 +208,6 @@ async function saveLeetCodeSubmissions(userId, username, submissions) {
 
     let status = existing?.status || "ACCEPTED";
 
-    // ======================================================
-    // CHEAT DETECTION
-    // ======================================================
-
-    // Only create a new review when the submission
-    // has NOT already been reviewed.
-    //
-    // APPROVED  -> stay approved
-    // REJECTED  -> stay rejected
-    // PENDING   -> stay pending
-    // NEW + rapid -> pending
-
     const alreadyReviewed =
       existing?.review_status === "approved" ||
       existing?.review_status === "rejected";
@@ -406,19 +394,11 @@ router.get("/queue", async (req, res) => {
       });
     }
 
-    // ------------------------------------------------------
-    // UNIQUE STUDENTS
-    // ------------------------------------------------------
-
     const studentIds = [
       ...new Set(
         submissions.map((submission) => submission.user_id).filter(Boolean),
       ),
     ];
-
-    // ------------------------------------------------------
-    // PROFILES
-    // ------------------------------------------------------
 
     const { data: profiles, error: profileError } = await supabaseAdmin
       .from("profiles")
@@ -445,10 +425,6 @@ router.get("/queue", async (req, res) => {
       profileMap[profile.user_id] = profile;
     }
 
-    // ------------------------------------------------------
-    // SQUADS
-    // ------------------------------------------------------
-
     const { data: squadStudents, error: squadError } = await supabaseAdmin
       .from("squad_students")
       .select(
@@ -472,10 +448,6 @@ router.get("/queue", async (req, res) => {
     for (const squad of squadStudents || []) {
       squadMap[squad.student_user_id] = squad.squad_id;
     }
-
-    // ------------------------------------------------------
-    // LEADERBOARD
-    // ------------------------------------------------------
 
     const { data: leaderboardRecords, error: leaderboardError } =
       await supabaseAdmin
@@ -507,10 +479,6 @@ router.get("/queue", async (req, res) => {
     for (const leaderboard of leaderboardRecords || []) {
       leaderboardMap[leaderboard.user_id] = leaderboard;
     }
-
-    // ------------------------------------------------------
-    // GROUP
-    // ------------------------------------------------------
 
     const studentMap = {};
 
@@ -626,74 +594,11 @@ router.patch("/:studentUserId/approve", async (req, res) => {
       logSupabaseError("Approving mentor review", error, {
         studentUserId,
       });
-    }
-
-    try {
-      console.log(
-        `[MENTOR REVIEW] Approving pending submissions for ${studentUserId}`
-      );
-
-      const {
-        data,
-        error,
-      } = await supabaseAdmin
-        .from("leetcode_submissions")
-        .update({
-          review_status: "approved",
-          status: "APPROVED",
-          flag_reason: null,
-        })
-        .eq("user_id", studentUserId)
-        .eq("review_status", "pending")
-        .select();
-
-      if (error) {
-        logSupabaseError(
-          "Approving mentor review",
-          error,
-          {
-            studentUserId,
-          }
-        );
-
-        return res.status(500).json({
-          error:
-            "Failed to approve submissions",
-        });
-      }
-
-      // Update leaderboard suspension status
-      await updateLeaderboardSuspensionStatus(studentUserId);
-
-      console.log(
-        `[MENTOR REVIEW] Approved ${
-          data?.length || 0
-        } submissions`
-      );
-
-      return res.status(200).json({
-        message:
-          "Submissions approved successfully",
-
-        updatedCount:
-          data?.length || 0,
-
-        reviews: data || [],
-      });
-    } catch (error) {
-      console.error(
-        "[APPROVE REVIEW EXCEPTION]",
-        error
-      );
 
       return res.status(500).json({
         error: "Failed to approve submissions",
       });
     }
-
-    // ------------------------------------------------------
-    // Get profile ID
-    // ------------------------------------------------------
 
     const { data: profile, error: profileError } = await supabaseAdmin
       .from("profiles")
@@ -766,10 +671,6 @@ router.patch("/:studentUserId/reject", async (req, res) => {
       });
     }
 
-    // ------------------------------------------------------
-    // Get profile ID
-    // ------------------------------------------------------
-
     const { data: profile, error: profileError } = await supabaseAdmin
       .from("profiles")
       .select("id")
@@ -810,10 +711,6 @@ router.patch("/:studentUserId/reject", async (req, res) => {
 
 router.get("/leetcode-leaderboard", async (req, res) => {
   try {
-    // ------------------------------------------------------
-    // 1. GET LEADERBOARD
-    // ------------------------------------------------------
-
     const { data: leaderboardData, error: leaderboardError } =
       await supabaseAdmin
         .from("leetcode_leaderboard")
@@ -852,10 +749,6 @@ router.get("/leetcode-leaderboard", async (req, res) => {
       return res.json([]);
     }
 
-    // ------------------------------------------------------
-    // 2. GET PROFILES
-    // ------------------------------------------------------
-
     const userIds = leaderboardData.map((row) => row.user_id).filter(Boolean);
 
     const { data: profiles, error: profileError } = await supabaseAdmin
@@ -880,10 +773,6 @@ router.get("/leetcode-leaderboard", async (req, res) => {
       profileMap[profile.user_id] = profile;
     }
 
-    // ------------------------------------------------------
-    // 3. GET PENDING SUBMISSIONS
-    // ------------------------------------------------------
-
     const { data: pendingSubmissions, error: pendingError } =
       await supabaseAdmin
         .from("leetcode_submissions")
@@ -898,10 +787,6 @@ router.get("/leetcode-leaderboard", async (req, res) => {
       });
     }
 
-    // ------------------------------------------------------
-    // 4. COUNT PENDING
-    // ------------------------------------------------------
-
     const pendingCountMap = {};
 
     for (const submission of pendingSubmissions || []) {
@@ -911,10 +796,6 @@ router.get("/leetcode-leaderboard", async (req, res) => {
 
       pendingCountMap[userId] = (pendingCountMap[userId] || 0) + 1;
     }
-
-    // ------------------------------------------------------
-    // 5. BUILD RESULT
-    // ------------------------------------------------------
 
     const result = leaderboardData
       .map((entry) => {
@@ -932,17 +813,7 @@ router.get("/leetcode-leaderboard", async (req, res) => {
           is_under_review: pendingReviewCount > 0,
         };
       })
-
-      // --------------------------------------------------
-      // HIDE UNDER REVIEW
-      // --------------------------------------------------
-
       .filter((student) => !student.is_under_review && !student.is_suspended)
-
-      // --------------------------------------------------
-      // SORT
-      // --------------------------------------------------
-
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
 
     console.log(
@@ -971,10 +842,6 @@ async function notifyMentorsAboutInactiveStudents() {
   console.log("\n[EMAIL SYSTEM] Starting mentor notifications...");
 
   try {
-    // --------------------------------------------------------
-    // 1. GET INACTIVE STUDENTS
-    // --------------------------------------------------------
-
     const { data: inactiveRecords, error: inactiveError } = await supabaseAdmin
       .from("leetcode_leaderboard")
       .select(
@@ -993,10 +860,6 @@ async function notifyMentorsAboutInactiveStudents() {
       `[EMAIL SYSTEM] Inactive students: ${inactiveRecords?.length || 0}`,
     );
 
-    // --------------------------------------------------------
-    // 2. GET ASSIGNMENTS
-    // --------------------------------------------------------
-
     const { data: assignments, error: assignmentError } = await supabaseAdmin
       .from("squad_students")
       .select("student_user_id, mentor_user_id");
@@ -1010,10 +873,6 @@ async function notifyMentorsAboutInactiveStudents() {
 
       return;
     }
-
-    // --------------------------------------------------------
-    // 3. STUDENT -> MENTORS
-    // --------------------------------------------------------
 
     const studentToMentorsMap = {};
     const allAssignedStudentUserIds = new Set();
@@ -1038,10 +897,6 @@ async function notifyMentorsAboutInactiveStudents() {
       allAssignedStudentUserIds.add(studentId);
     }
 
-    // --------------------------------------------------------
-    // 4. GET STUDENT PROFILES
-    // --------------------------------------------------------
-
     const { data: allStudentProfiles, error: profilesError } =
       await supabaseAdmin
         .from("profiles")
@@ -1059,10 +914,6 @@ async function notifyMentorsAboutInactiveStudents() {
     console.log(
       `[EMAIL SYSTEM] Students without LeetCode profile: ${missingProfileStudents.length}`,
     );
-
-    // --------------------------------------------------------
-    // 5. MENTORS TO NOTIFY
-    // --------------------------------------------------------
 
     const mentorIdsToNotify = new Set();
 
@@ -1089,22 +940,44 @@ async function notifyMentorsAboutInactiveStudents() {
     }
 
     // --------------------------------------------------------
-    // 6. GET MENTOR PROFILES
+    // 6. GET MENTOR DATA FROM SUPABASE AUTH ADMIN
     // --------------------------------------------------------
-
-    const { data: mentorProfiles, error: mentorError } = await supabaseAdmin
-      .from("profiles")
-      .select("user_id, name, kalvium_email")
-      .in("user_id", Array.from(mentorIdsToNotify));
-
-    if (mentorError) {
-      throw mentorError;
-    }
 
     const mentorDataMap = {};
 
-    for (const mentor of mentorProfiles || []) {
-      mentorDataMap[mentor.user_id] = mentor;
+    for (const mentorId of mentorIdsToNotify) {
+      try {
+        const { data: authData, error: authError } =
+          await supabaseAdmin.auth.admin.getUserById(mentorId);
+
+        if (authError || !authData?.user) {
+          console.error(
+            `[EMAIL SYSTEM] Could not fetch auth user for mentor ${mentorId}:`,
+            authError?.message,
+          );
+
+          continue;
+        }
+
+        const user = authData.user;
+
+        mentorDataMap[mentorId] = {
+          id: mentorId,
+
+          name:
+            user.user_metadata?.name ||
+            user.user_metadata?.full_name ||
+            user.raw_user_meta_data?.name ||
+            "Mentor",
+
+          kalvium_email: user.email,
+        };
+      } catch (err) {
+        console.error(
+          `[EMAIL SYSTEM EXCEPTION] Error fetching auth user ${mentorId}:`,
+          err.message,
+        );
+      }
     }
 
     // --------------------------------------------------------
@@ -1417,10 +1290,6 @@ async function syncSingleLeetCodeProfile(
 
   console.log("============================================================");
 
-  // ----------------------------------------------------------
-  // VALIDATE USERNAME
-  // ----------------------------------------------------------
-
   if (!username || !isValidLeetCodeUsername(username)) {
     console.warn("[INVALID LEETCODE USERNAME]", {
       profileId,
@@ -1434,10 +1303,6 @@ async function syncSingleLeetCodeProfile(
       username: username || rawLeetCodeUrl,
     };
   }
-
-  // ----------------------------------------------------------
-  // GRAPHQL QUERY
-  // ----------------------------------------------------------
 
   const query = `
     query getUserStats(
@@ -1473,10 +1338,6 @@ async function syncSingleLeetCodeProfile(
     }
   `;
 
-  // ----------------------------------------------------------
-  // RETRIES
-  // ----------------------------------------------------------
-
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       console.log(`[LEETCODE] ${username} | Request ${attempt}/${maxRetries}`);
@@ -1503,10 +1364,6 @@ async function syncSingleLeetCodeProfile(
 
       console.log(`[LEETCODE RESPONSE] ${username} | HTTP ${response.status}`);
 
-      // ------------------------------------------------------
-      // RATE LIMIT / SERVER ERROR
-      // ------------------------------------------------------
-
       if (response.status === 429 || response.status >= 500) {
         const backoffTime = attempt * 5000;
 
@@ -1527,10 +1384,6 @@ async function syncSingleLeetCodeProfile(
         };
       }
 
-      // ------------------------------------------------------
-      // HTTP ERROR
-      // ------------------------------------------------------
-
       if (!response.ok) {
         return {
           status: "HTTP_ERROR",
@@ -1541,15 +1394,7 @@ async function syncSingleLeetCodeProfile(
         };
       }
 
-      // ------------------------------------------------------
-      // PARSE RESPONSE
-      // ------------------------------------------------------
-
       const result = await response.json();
-
-      // ------------------------------------------------------
-      // GRAPHQL ERROR
-      // ------------------------------------------------------
 
       if (result.errors) {
         console.error(`[LEETCODE GRAPHQL ERROR] ${username}`, result.errors);
@@ -1580,10 +1425,6 @@ async function syncSingleLeetCodeProfile(
         };
       }
 
-      // ------------------------------------------------------
-      // USER
-      // ------------------------------------------------------
-
       const matchedUser = result?.data?.matchedUser;
 
       if (!matchedUser) {
@@ -1595,10 +1436,6 @@ async function syncSingleLeetCodeProfile(
           username,
         };
       }
-
-      // ------------------------------------------------------
-      // STATS
-      // ------------------------------------------------------
 
       const submitStats = matchedUser.submitStatsGlobal?.acSubmissionNum || [];
 
@@ -1616,10 +1453,6 @@ async function syncSingleLeetCodeProfile(
 
       const ranking = matchedUser.profile?.ranking || 0;
 
-      // Easy = 1
-      // Medium = 1.5
-      // Hard = 2
-
       const score = easySolved + mediumSolved * 1.5 + hardSolved * 2;
 
       console.log("\n[LEETCODE STATS]");
@@ -1636,10 +1469,6 @@ async function syncSingleLeetCodeProfile(
 
       console.log(`Score    : ${score}`);
 
-      // ------------------------------------------------------
-      // RECENT SUBMISSIONS
-      // ------------------------------------------------------
-
       const recentSubmissions = result?.data?.recentAcSubmissionList || [];
 
       let lastSolvedAt = null;
@@ -1652,10 +1481,6 @@ async function syncSingleLeetCodeProfile(
         }
       }
 
-      // ------------------------------------------------------
-      // SAVE SUBMISSIONS
-      // ------------------------------------------------------
-
       const submissionResult = await saveLeetCodeSubmissions(
         userId,
         matchedUser.username,
@@ -1667,10 +1492,6 @@ async function syncSingleLeetCodeProfile(
           `[SUBMISSIONS WARNING] ${username} | Failed to save submissions`,
         );
       }
-
-      // ------------------------------------------------------
-      // FALLBACK LAST SOLVED
-      // ------------------------------------------------------
 
       if (!lastSolvedAt) {
         console.log(
@@ -1697,10 +1518,6 @@ async function syncSingleLeetCodeProfile(
         lastSolvedAt = existingData?.last_solved_at || null;
       }
 
-      // ------------------------------------------------------
-      // ACTIVE STATUS
-      // ------------------------------------------------------
-
       const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
       const lastSolvedTime = lastSolvedAt
@@ -1710,10 +1527,6 @@ async function syncSingleLeetCodeProfile(
       const isLeetCodeActive =
         Number.isFinite(lastSolvedTime) &&
         Date.now() - lastSolvedTime <= ONE_DAY_MS;
-
-      // ------------------------------------------------------
-      // CHECK PENDING REVIEWS
-      // ------------------------------------------------------
 
       console.log(
         `[SUSPENSION CHECK] ${username} | Checking pending reviews...`,
@@ -1734,7 +1547,6 @@ async function syncSingleLeetCodeProfile(
           username,
         });
 
-        // Do not accidentally unsuspend.
         return {
           status: "DB_ERROR",
 
@@ -1758,10 +1570,6 @@ async function syncSingleLeetCodeProfile(
           `pending=${hasPendingReviews} | ` +
           `suspended=${isSuspended}`,
       );
-
-      // ------------------------------------------------------
-      // LEADERBOARD UPSERT
-      // ------------------------------------------------------
 
       const upsertPayload = {
         profile_id: profileId,
@@ -1836,10 +1644,6 @@ async function syncSingleLeetCodeProfile(
           error: dbError.message,
         };
       }
-
-      // ------------------------------------------------------
-      // VERIFY DATABASE
-      // ------------------------------------------------------
 
       const { data: verifiedLeaderboard, error: verifyError } =
         await supabaseAdmin
@@ -1925,10 +1729,6 @@ async function syncSingleLeetCodeProfile(
 // ============================================================
 
 router.post("/update-leetcode", async (req, res) => {
-  // --------------------------------------------------------
-  // AUTH
-  // --------------------------------------------------------
-
   const authHeader = req.headers.authorization;
 
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -1941,25 +1741,13 @@ router.post("/update-leetcode", async (req, res) => {
 
   console.log("[AUTH SUCCESS] Cron request authenticated.");
 
-  // --------------------------------------------------------
-  // RESPOND IMMEDIATELY
-  // --------------------------------------------------------
-
   res.status(200).json({
     message: "Leaderboard update process started in background.",
   });
 
-  // --------------------------------------------------------
-  // BACKGROUND PROCESS
-  // --------------------------------------------------------
-
   try {
     let users = null;
     let fetchError = null;
-
-    // ------------------------------------------------------
-    // FETCH PROFILES
-    // ------------------------------------------------------
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       const { data, error } = await supabaseAdmin
@@ -1993,10 +1781,6 @@ router.post("/update-leetcode", async (req, res) => {
 
     console.log(`[PROFILE FETCH SUCCESS] Found ${users.length} profiles.`);
 
-    // ------------------------------------------------------
-    // SYNC EVERY STUDENT
-    // ------------------------------------------------------
-
     for (let index = 0; index < users.length; index++) {
       const user = users[index];
 
@@ -2012,10 +1796,6 @@ router.post("/update-leetcode", async (req, res) => {
 
       await delay(getRandomDelay());
     }
-
-    // ------------------------------------------------------
-    // SEND MENTOR EMAILS
-    // ------------------------------------------------------
 
     await notifyMentorsAboutInactiveStudents();
 
