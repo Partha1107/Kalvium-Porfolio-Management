@@ -58,6 +58,8 @@ function Leaderboard() {
       try {
         const leaderboardData = await getLeaderboardData();
 
+        console.log("LEADERBOARD RAW DATA:", leaderboardData);
+
         const rows = Array.isArray(leaderboardData)
           ? leaderboardData
           : [];
@@ -79,10 +81,22 @@ function Leaderboard() {
 
           const isSuspended = entry?.is_suspended === true;
 
-          const isUnderReview =
-            isSuspended ||
+          const isFlagged =
+            entry?.is_flagged === true ||
+            entry?.flagged === true ||
             entry?.is_under_review === true ||
             pendingReviewCount > 0;
+
+          const isUnderReview = isSuspended || isFlagged;
+
+          console.log("STUDENT REVIEW CHECK:", {
+            username: entry?.leetcode_username,
+            pending_review_count: entry?.pending_review_count,
+            is_flagged: entry?.is_flagged,
+            flagged: entry?.flagged,
+            is_under_review: entry?.is_under_review,
+            is_suspended: entry?.is_suspended,
+          });
 
           // ============================================================
           // AVATAR
@@ -95,11 +109,13 @@ function Leaderboard() {
 
           const avatar =
             profile?.avatar_url &&
-            profile.avatar_url.trim() !== ""
+              profile.avatar_url.trim() !== ""
               ? profile.avatar_url
               : `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                  studentName
-                )}&background=ffdddd&color=d71920&size=256`;
+                studentName
+              )}&background=ffdddd&color=d71920&size=256`;
+
+
 
           // ============================================================
           // TOTAL SOLVED
@@ -115,7 +131,6 @@ function Leaderboard() {
           // ============================================================
 
           const score = Number(entry?.score ?? 0);
-
           return {
             user_id:
               entry?.user_id ||
@@ -124,9 +139,7 @@ function Leaderboard() {
               null,
 
             name: studentName,
-
             username: entry?.leetcode_username || "",
-
             avatar,
 
             easySolved,
@@ -134,7 +147,6 @@ function Leaderboard() {
             hardSolved,
 
             total: totalSolved,
-
             score,
 
             ranking: entry?.ranking ?? null,
@@ -142,7 +154,7 @@ function Leaderboard() {
             pendingReviewCount,
 
             isSuspended,
-
+            isFlagged,
             isUnderReview,
           };
         });
@@ -449,13 +461,12 @@ function Leaderboard() {
                     pts
                   </div>
 
-                  {topThree[1].pendingReviewCount > 0 && (
+                  {topThree[1].isUnderReview && (
                     <div
-                      className="pending-badge"
-                      title="Pending mentor review"
+                      className="flagged-review-badge"
+                      title="This student's submissions are under review"
                     >
-                      ⏳ {topThree[1].pendingReviewCount}{" "}
-                      in Review
+                      🚩 Flagged - Under Review
                     </div>
                   )}
 
@@ -518,13 +529,12 @@ function Leaderboard() {
                     pts
                   </div>
 
-                  {topThree[0].pendingReviewCount > 0 && (
+                  {topThree[0].isUnderReview && (
                     <div
-                      className="pending-badge"
-                      title="Pending mentor review"
+                      className="flagged-review-badge"
+                      title="This student's submissions are under review"
                     >
-                      ⏳ {topThree[0].pendingReviewCount}{" "}
-                      in Review
+                      🚩 Flagged - Under Review
                     </div>
                   )}
 
@@ -587,13 +597,12 @@ function Leaderboard() {
                     pts
                   </div>
 
-                  {topThree[2].pendingReviewCount > 0 && (
+                  {topThree[2].isUnderReview && (
                     <div
-                      className="pending-badge"
-                      title="Pending mentor review"
+                      className="flagged-review-badge"
+                      title="This student's submissions are under review"
                     >
-                      ⏳ {topThree[2].pendingReviewCount}{" "}
-                      in Review
+                      🚩 Flagged - Under Review
                     </div>
                   )}
 
@@ -685,14 +694,12 @@ function Leaderboard() {
                         </span>
                       </div>
 
-                      {student.pendingReviewCount > 0 && (
+                      {student.isUnderReview && (
                         <span
-                          className="table-pending-pill"
-                          title="Solves under mentor evaluation"
+                          className="flagged-review-pill"
+                          title="This student's submissions are under mentor review"
                         >
-                          ⏳{" "}
-                          {student.pendingReviewCount}{" "}
-                          review
+                          🚩 Flagged - Under Review
                         </span>
                       )}
                     </div>
@@ -747,11 +754,10 @@ function Leaderboard() {
                 ).map((page) => (
                   <button
                     key={page}
-                    className={`pagination-number ${
-                      currentPage === page
-                        ? "active"
-                        : ""
-                    }`}
+                    className={`pagination-number ${currentPage === page
+                      ? "active"
+                      : ""
+                      }`}
                     onClick={() =>
                       goToPage(page)
                     }

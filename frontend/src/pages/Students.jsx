@@ -55,6 +55,7 @@ export default function Students() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSquad, setSelectedSquad] = useState("all");
   const [sortOrder, setSortOrder] = useState("asc");
+  const itemsPerPage = 12;
 
   const availableSquads = Array.from(
     new Set(studentsData.map((student) => student.squad_id).filter(Boolean))
@@ -89,11 +90,6 @@ export default function Students() {
   const endIndex = Math.min(startIndex + itemsPerPage, totalItems);
   const currentStudents = sortedStudents.slice(startIndex, endIndex);
 
-  const currentStudents = filteredStudents.slice(
-    startIndex,
-    endIndex
-  );
-
   const itemsToRenderCount = isLoading
     ? itemsPerPage
     : currentStudents.length;
@@ -115,7 +111,6 @@ export default function Students() {
 
         const formattedStudents = students.map((student) => ({
           user_id: student.user_id,
-          squad_id: student.squad_id,
           name: student.name || "Unknown",
           role: student.title || student.role || "Student",
 

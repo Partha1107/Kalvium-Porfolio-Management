@@ -1,718 +1,1025 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
-import { createAuthedSupabaseClient, supabase } from "../config/supabase.js";
+
+import {
+  createAuthedSupabaseClient,
+  supabase,
+  supabaseAdmin,
+} from "../config/supabase.js";
 
 const router = express.Router();
 
-const saveSquadLimiter = rateLimit({
+// ============================================================
+// RATE LIMIT
+// ============================================================
+
+const reviewLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { error: "Too many requests. Please try again later." },
+  max: 100,
   standardHeaders: true,
   legacyHeaders: false,
+  message: {
+    success: false,
+    error: "Too many review requests. Please try again later.",
+  },
 });
 
-// ==========================================
-// HELPER: FILTER OUT SUSPENDED STUDENTS
-// ==========================================
-const filterSuspendedStudents = (students) => {
-  return students.filter((student) => !student.is_suspended);
-};
+// ============================================================
+// AUTHENTICATION
+// ============================================================
 
 const requireAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
+
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Unauthorized: Missing token" });
+      return res.status(401).json({
+        success: false,
+        error: "Missing or invalid Authorization header",
+      });
     }
 
-    const token = authHeader.split(" ")[1];
+    const token = authHeader.substring(7).trim();
 
-    // Verify token using imported supabase client
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        error: "Missing authentication token",
+      });
+    }
+
     const {
       data: { user },
-      error,
+      error: authError,
     } = await supabase.auth.getUser(token);
 
-    if (error || !user) {
-      return res.status(401).json({ error: "Unauthorized: Invalid token" });
+    if (authError || !user) {
+      console.error(
+        "[MENTOR REVIEW AUTH ERROR]",
+        authError
+      );
+
+      return res.status(401).json({
+        success: false,
+        error: "Invalid or expired token",
+      });
     }
 
     req.user = user;
-    // Attach authed client so queries run with the user's RLS context
-    req.authedSupabase = createAuthedSupabaseClient(token);
+
+    // Keep authenticated client available if needed elsewhere.
+    req.authedSupabase =
+      createAuthedSupabaseClient(token);
+
+    // --------------------------------------------------------
+    // IMPORTANT
+    //
+    // Mentor dashboard database operations use supabaseAdmin.
+    // This avoids RLS hiding mentor/student/submission rows.
+    // --------------------------------------------------------
+
+    if (!supabaseAdmin) {
+      console.error(
+        "[MENTOR REVIEW] SUPABASE_SERVICE_KEY is missing."
+      );
+
+      return res.status(500).json({
+        success: false,
+        error: "Server database configuration is incomplete",
+      });
+    }
+
+    req.adminSupabase = supabaseAdmin;
+
     next();
-  } catch (err) {
-    return res.status(401).json({ error: "Authentication failed" });
+  } catch (error) {
+    console.error(
+      "[MENTOR REVIEW AUTH EXCEPTION]",
+      error
+    );
+
+    return res.status(500).json({
+      success: false,
+      error: "Authentication failed",
+    });
   }
 };
 
-// ==========================================
-// HELPER: NORMALIZE STUDENT ACTIVITY FIELDS
-// ==========================================
-const normalizeStudentActivity = (profile = {}) => {
-  const rawActive =
-    profile.is_leetcode_active ??
-    profile.leetcode_active ??
-    profile.is_active ??
-    profile.active;
+// ============================================================
+// HELPER: GET STUDENTS MENTOR CAN REVIEW
+// ============================================================
 
-  const rawLastSolved =
-    profile.last_solved_at ??
-    profile.leetcode_last_solved_at ??
-    profile.last_solved ??
-    profile.last_active_at ??
-    profile.updated_at;
+const getMentorReviewStudents = async (
+  db,
+  mentorUserId
+) => {
+  console.log(
+    "[MENTOR REVIEW] Loading mentor assignments..."
+  );
 
-  const rawTotalSolved =
-    profile.total_solved ??
-    profile.totalSolved ??
-    profile.leetcode_total_solved ??
-    profile.solved_count ??
-    0;
+  // ----------------------------------------------------------
+  // 1. GET MENTOR'S ASSIGNED SQUADS
+  // ----------------------------------------------------------
 
-  const totalSolved = Number(rawTotalSolved) || 0;
-  const hasSolvedProblems = totalSolved > 0;
-  const validLastSolved = hasSolvedProblems ? rawLastSolved || null : null;
+  const {
+    data: mentorSquads,
+    error: mentorSquadsError,
+  } = await db
+    .from("mentor_squads")
+    .select("squad_id")
+    .eq("mentor_user_id", mentorUserId);
 
-  let isActive = false;
-  if (hasSolvedProblems && validLastSolved) {
-    const solvedDate = new Date(validLastSolved);
-    if (!isNaN(solvedDate.getTime())) {
-      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-      isActive = solvedDate.getTime() >= sevenDaysAgo;
+  if (mentorSquadsError) {
+    throw new Error(
+      `Failed to load mentor squads: ${mentorSquadsError.message}`
+    );
+  }
+
+  const squadIds = [
+    ...new Set(
+      (mentorSquads || [])
+        .map((item) => item.squad_id)
+        .filter(
+          (id) =>
+            id !== null &&
+            id !== undefined
+        )
+    ),
+  ];
+
+  console.log(
+    "[MENTOR REVIEW] Mentor squad IDs:",
+    squadIds
+  );
+
+  // ----------------------------------------------------------
+  // 2. GET DIRECTLY ASSIGNED STUDENTS
+  // ----------------------------------------------------------
+
+  const {
+    data: directAssignments,
+    error: directAssignmentError,
+  } = await db
+    .from("squad_students")
+    .select(`
+      student_user_id,
+      squad_id,
+      assigned_at
+    `)
+    .eq("mentor_user_id", mentorUserId);
+
+  if (directAssignmentError) {
+    throw new Error(
+      `Failed to load assigned students: ${directAssignmentError.message}`
+    );
+  }
+
+  console.log(
+    "[MENTOR REVIEW] Direct assignments:",
+    directAssignments || []
+  );
+
+  // ----------------------------------------------------------
+  // 3. GET STUDENTS THROUGH MENTOR'S SQUADS
+  // ----------------------------------------------------------
+
+  let squadProfiles = [];
+
+  if (squadIds.length > 0) {
+    const {
+      data,
+      error,
+    } = await db
+      .from("profiles")
+      .select(`
+        user_id,
+        squad_id
+      `)
+      .in("squad_id", squadIds);
+
+    if (error) {
+      throw new Error(
+        `Failed to load squad students: ${error.message}`
+      );
+    }
+
+    squadProfiles = data || [];
+  }
+
+  console.log(
+    "[MENTOR REVIEW] Students from squads:",
+    squadProfiles
+  );
+
+  // ----------------------------------------------------------
+  // 4. MERGE STUDENTS
+  // ----------------------------------------------------------
+
+  const studentMap = new Map();
+
+  // Direct mentor -> student assignments
+  for (const assignment of directAssignments || []) {
+    if (!assignment.student_user_id) {
+      continue;
+    }
+
+    const studentId = String(
+      assignment.student_user_id
+    );
+
+    studentMap.set(studentId, {
+      student_user_id:
+        assignment.student_user_id,
+
+      squad_id:
+        assignment.squad_id ?? null,
+
+      assigned_at:
+        assignment.assigned_at ?? null,
+    });
+  }
+
+  // Students belonging to mentor squads
+  for (const profile of squadProfiles || []) {
+    if (!profile.user_id) {
+      continue;
+    }
+
+    const studentId = String(
+      profile.user_id
+    );
+
+    if (!studentMap.has(studentId)) {
+      studentMap.set(studentId, {
+        student_user_id:
+          profile.user_id,
+
+        squad_id:
+          profile.squad_id ?? null,
+
+        assigned_at: null,
+      });
     }
   }
 
-  // If the raw active flag is true but the student has zero solved problems,
-  // it must still be treated as inactive.
-  if (!hasSolvedProblems) {
-    isActive = false;
-  }
+  const students =
+    Array.from(studentMap.values());
+
+  console.log(
+    "[MENTOR REVIEW] Final mentor students:",
+    students
+  );
 
   return {
-    ...profile,
-    id: profile.user_id || profile.id,
-    student_user_id: profile.user_id || profile.student_user_id || profile.id,
-    name: profile.name || "Unknown",
-    email:
-      profile.kalvium_email ||
-      profile.personal_email ||
-      profile.email ||
-      "No email",
-    avatar_url: profile.avatar_url || null,
-    is_leetcode_active: isActive,
-    total_solved: totalSolved,
-    last_solved_at: validLastSolved,
-    leetcode:
-      profile.leetcode ||
-      profile.leetcode_username ||
-      profile.leetcode_handle ||
-      null,
-    github:
-      profile.github ||
-      profile.github_username ||
-      profile.github_handle ||
-      null,
-    linkedin: profile.linkedin || profile.linkedin_url || null,
-    is_suspended: profile.is_suspended || false,
-    suspension_reason: profile.suspension_reason || null,
+    squadIds,
+    students,
   };
 };
 
-// Helper: Build a lookup map from leetcode_leaderboard data
-const createLeaderboardMap = (leaderboardRows = []) => {
-  const map = new Map();
-  leaderboardRows.forEach((row) => {
-    if (row.user_id) map.set(String(row.user_id), row);
-    if (row.profile_id) map.set(String(row.profile_id), row);
-  });
-  return map;
+// ============================================================
+// HELPER: VERIFY MENTOR ACCESS
+// ============================================================
+
+const verifyMentorCanReviewStudent = async (
+  db,
+  mentorUserId,
+  studentUserId
+) => {
+  const {
+    students,
+  } = await getMentorReviewStudents(
+    db,
+    mentorUserId
+  );
+
+  return (
+    students.find(
+      (student) =>
+        String(
+          student.student_user_id
+        ) === String(studentUserId)
+    ) || null
+  );
 };
 
-// ==========================================
-// SQUAD MANAGEMENT ROUTES (mentor_squads)
-// ==========================================
+// ============================================================
+// HELPER: UPDATE LEADERBOARD REVIEW STATUS
+// ============================================================
 
-router.get("/getsquads", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const db = req.authedSupabase;
+const updateStudentReviewStatus = async (
+  db,
+  studentUserId
+) => {
+  // ----------------------------------------------------------
+  // PENDING COUNT
+  // ----------------------------------------------------------
 
-    const { data, error } = await db
-      .from("mentor_squads")
-      .select("squad_id")
-      .eq("mentor_user_id", mentorUserId);
+  const {
+    count: pendingCount,
+    error: pendingError,
+  } = await db
+    .from("leetcode_submissions")
+    .select("*", {
+      count: "exact",
+      head: true,
+    })
+    .eq("user_id", studentUserId)
+    .eq("review_status", "pending");
 
-    if (error) {
-      console.error("Fetch Squads Error:", error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    const squads = data ? data.map((item) => item.squad_id) : [];
-
-    return res.status(200).json({
-      success: true,
-      squads,
-    });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+  if (pendingError) {
+    throw new Error(
+      `Failed to count pending submissions: ${pendingError.message}`
+    );
   }
-});
 
-router.post("/savesquad", saveSquadLimiter, requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const { squads } = req.body;
+  // ----------------------------------------------------------
+  // REJECTED COUNT
+  // ----------------------------------------------------------
 
-    if (!squads) {
-      return res.status(400).json({ error: "Squads field is required" });
-    }
+  const {
+    count: rejectedCount,
+    error: rejectedError,
+  } = await db
+    .from("leetcode_submissions")
+    .select("*", {
+      count: "exact",
+      head: true,
+    })
+    .eq("user_id", studentUserId)
+    .eq("review_status", "rejected");
 
-    const squadList = Array.isArray(squads) ? squads : [squads];
-    const db = req.authedSupabase;
-
-    const { error: deleteError } = await db
-      .from("mentor_squads")
-      .delete()
-      .eq("mentor_user_id", mentorUserId);
-
-    if (deleteError) {
-      console.error("Delete Error:", deleteError);
-      return res.status(400).json({ error: deleteError.message });
-    }
-
-    if (squadList.length > 0) {
-      const recordsToInsert = squadList.map((squadId) => ({
-        mentor_user_id: mentorUserId,
-        squad_id: Number(squadId),
-      }));
-
-      const { data, error: insertError } = await db
-        .from("mentor_squads")
-        .insert(recordsToInsert)
-        .select();
-
-      if (insertError) {
-        console.error("Insert Error:", insertError);
-        return res.status(400).json({ error: insertError.message });
-      }
-
-      return res
-        .status(200)
-        .json({ success: true, message: "Squads saved successfully", data });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "All squad assignments cleared",
-      data: [],
-    });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+  if (rejectedError) {
+    throw new Error(
+      `Failed to count rejected submissions: ${rejectedError.message}`
+    );
   }
-});
 
-router.get("/students", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const db = req.authedSupabase;
-    const requestedSquadId = req.query.squad_id;
+  const hasPendingReviews =
+    Number(pendingCount || 0) > 0;
 
-    const { data: mentorSquads, error: squadError } = await db
-      .from("mentor_squads")
-      .select("squad_id")
-      .eq("mentor_user_id", mentorUserId);
+  const hasRejectedReviews =
+    Number(rejectedCount || 0) > 0;
 
-    if (squadError) {
-      console.error("Fetch Mentor Squads Error:", squadError);
-      return res.status(400).json({ error: squadError.message });
-    }
+  let isSuspended = false;
+  let suspensionReason = null;
 
-    const assignedSquadIds = mentorSquads
-      ? mentorSquads.map((s) => String(s.squad_id))
-      : [];
+  // ----------------------------------------------------------
+  // SUSPENSION LOGIC
+  // ----------------------------------------------------------
 
-    if (assignedSquadIds.length === 0) {
-      return res.status(200).json({ success: true, count: 0, students: [] });
-    }
+  if (hasRejectedReviews) {
+    isSuspended = true;
 
-    let query = db.from("profiles").select("*");
+    suspensionReason =
+      "Rejected for suspicious submission patterns";
+  } else if (hasPendingReviews) {
+    isSuspended = true;
 
-    if (requestedSquadId) {
-      const requestedStr = String(requestedSquadId);
-      if (!assignedSquadIds.includes(requestedStr)) {
-        return res
-          .status(403)
-          .json({ error: "Forbidden: You are not assigned to this squad" });
-      }
-      query = query.eq("squad_id", requestedStr);
-    } else {
-      query = query.in("squad_id", assignedSquadIds);
-    }
-
-    const { data: students, error: studentError } = await query;
-
-    if (studentError) {
-      console.error("Fetch Students Error:", studentError);
-      return res.status(400).json({ error: studentError.message });
-    }
-
-    // Fetch matching LeetCode activity stats from leetcode_leaderboard
-    const studentUserIds = students
-      ? students.map((s) => s.user_id || s.id).filter(Boolean)
-      : [];
-    const { data: leaderboardData } = await db
-      .from("leetcode_leaderboard")
-      .select("*")
-      .in("user_id", studentUserIds);
-
-    const leaderboardMap = createLeaderboardMap(leaderboardData);
-
-    // Merge profile info with leaderboard stats and normalize
-    const mappedStudents = students
-      ? students.map((s) => {
-          const stats =
-            leaderboardMap.get(String(s.user_id)) ||
-            leaderboardMap.get(String(s.id)) ||
-            {};
-          return normalizeStudentActivity({ ...s, ...stats });
-        })
-      : [];
-
-    return res.status(200).json({
-      success: true,
-      count: mappedStudents.length,
-      students: mappedStudents,
-    });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    suspensionReason =
+      "Pending mentor review for suspicious submission patterns";
   }
-});
 
-// ==========================================
-// INDIVIDUAL STUDENT ROUTES (squad_students)
-// ==========================================
+  // ----------------------------------------------------------
+  // UPDATE LEADERBOARD
+  // ----------------------------------------------------------
 
-router.get("/assigned-students", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const db = req.authedSupabase;
+  const {
+    error: leaderboardError,
+  } = await db
+    .from("leetcode_leaderboard")
+    .update({
+      is_suspended: isSuspended,
+      suspension_reason: suspensionReason,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", studentUserId);
 
-    // Step 1: Fetch assignments directly
-    const { data: assignments, error: assignError } = await db
-      .from("squad_students")
-      .select("squad_id, student_user_id, assigned_at")
-      .eq("mentor_user_id", mentorUserId);
-
-    if (assignError) {
-      console.error("Fetch Assigned Students Error:", assignError);
-      return res.status(400).json({ error: assignError.message });
-    }
-
-    if (!assignments || assignments.length === 0) {
-      return res.status(200).json({ success: true, students: [] });
-    }
-
-    // Step 2: Extract User IDs and fetch profiles
-    const studentIds = assignments.map((a) => a.student_user_id);
-
-    const { data: profiles, error: profileError } = await db
-      .from("profiles")
-      .select("*")
-      .in("user_id", studentIds);
-
-    if (profileError) {
-      console.error("Fetch Profiles Error:", profileError);
-      return res.status(400).json({ error: profileError.message });
-    }
-
-    // Step 3: Fetch activity stats from leetcode_leaderboard
-    const { data: leaderboardData } = await db
-      .from("leetcode_leaderboard")
-      .select("*")
-      .in("user_id", studentIds);
-
-    const leaderboardMap = createLeaderboardMap(leaderboardData);
-
-    // Step 4: Merge profiles + leaderboard stats and normalize
-    const assignedStudents = assignments.map((assignment) => {
-      const profile =
-        profiles?.find(
-          (p) => String(p.user_id) === String(assignment.student_user_id),
-        ) || {};
-      const stats =
-        leaderboardMap.get(String(assignment.student_user_id)) ||
-        leaderboardMap.get(String(profile.id)) ||
-        {};
-
-      const mergedData = { ...profile, ...stats };
-      const normalized = normalizeStudentActivity(mergedData);
-
-      return {
-        ...normalized,
-        student_user_id: assignment.student_user_id,
-        squad_id: assignment.squad_id || profile.squad_id,
-        assigned_at: assignment.assigned_at,
-      };
-    });
-
-    return res.status(200).json({
-      success: true,
-      students: assignedStudents,
-    });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+  if (leaderboardError) {
+    throw new Error(
+      `Failed to update leaderboard status: ${leaderboardError.message}`
+    );
   }
-});
 
-router.get("/student-stats/:studentUserId", requireAuth, async (req, res) => {
-  try {
-    const { studentUserId } = req.params;
-    const db = req.authedSupabase;
-
-    const [profileRes, statsRes] = await Promise.all([
-      db.from("profiles").select("*").eq("user_id", studentUserId).single(),
-      db
-        .from("leetcode_leaderboard")
-        .select("*")
-        .eq("user_id", studentUserId)
-        .maybeSingle(),
-    ]);
-
-    if (profileRes.error || !profileRes.data) {
-      return res.status(404).json({ error: "Student profile not found" });
-    }
-
-    const mergedData = { ...profileRes.data, ...(statsRes.data || {}) };
-    const normalized = normalizeStudentActivity(mergedData);
-
-    return res.status(200).json({ success: true, student: normalized });
-  } catch (error) {
-    console.error("Fetch Student Stats Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-router.post("/assign-student", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const { student_user_id, squad_id } = req.body;
-    const db = req.authedSupabase;
-
-    if (!student_user_id) {
-      return res.status(400).json({ error: "student_user_id is required" });
-    }
-
-    const { data, error } = await db
-      .from("squad_students")
-      .insert([
-        {
-          mentor_user_id: mentorUserId,
-          student_user_id: student_user_id,
-          squad_id: squad_id ? Number(squad_id) : null,
-        },
-      ])
-      .select();
-
-    if (error) {
-      console.error("Assign Student Error:", error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    return res
-      .status(200)
-      .json({ success: true, message: "Student assigned successfully", data });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-router.post("/unassign-student", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const { student_user_id } = req.body;
-    const db = req.authedSupabase;
-
-    if (!student_user_id) {
-      return res.status(400).json({ error: "student_user_id is required" });
-    }
-
-    const { error } = await db.from("squad_students").delete().match({
-      mentor_user_id: mentorUserId,
-      student_user_id: student_user_id,
-    });
-
-    if (error) {
-      console.error("Unassign Student Error:", error);
-      return res.status(400).json({ error: error.message });
-    }
-
-    return res
-      .status(200)
-      .json({ success: true, message: "Student unassigned successfully" });
-  } catch (error) {
-    console.error("Server Error:", error);
-    return res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ==========================================
-// MENTOR REVIEW QUEUE
-// ==========================================
-
-router.get("/leetcode-review/queue", requireAuth, async (req, res) => {
-  try {
-    const mentorUserId = req.user.id;
-    const db = req.authedSupabase;
-
-    // ==========================================
-    // 1. GET STUDENTS ASSIGNED TO THIS MENTOR
-    // ==========================================
-
-    const { data: assignments, error: assignmentError } = await db
-      .from("squad_students")
-      .select("student_user_id, squad_id, assigned_at")
-      .eq("mentor_user_id", mentorUserId);
-
-    if (assignmentError) {
-      console.error("Review Queue Assignment Error:", assignmentError);
-
-      return res.status(400).json({
-        error: assignmentError.message,
-      });
-    }
-
-    if (!assignments || assignments.length === 0) {
-      return res.status(200).json({
-        success: true,
-        reviews: [],
-      });
-    }
-
-    const studentIds = assignments
-      .map((item) => item.student_user_id)
-      .filter(Boolean);
-
-    // ==========================================
-    // 2. GET PENDING LEETCODE SUBMISSIONS
-    // ==========================================
-
-    const { data: pendingSubmissions, error: submissionError } = await db
-      .from("leetcode_submissions")
-      .select(
-        `
-                id,
-                user_id,
-                leetcode,
-                submission_id,
-                title_slug,
-                difficulty,
-                submitted_at,
-                flag_reason,
-                review_status,
-                status
-            `,
-      )
-      .eq("review_status", "pending")
-      .in("user_id", studentIds)
-      .order("submitted_at", {
-        ascending: true,
-      });
-
-    if (submissionError) {
-      console.error("Pending Submission Error:", submissionError);
-
-      return res.status(400).json({
-        error: submissionError.message,
-      });
-    }
-
-    // No pending submissions
-    if (!pendingSubmissions || pendingSubmissions.length === 0) {
-      return res.status(200).json({
-        success: true,
-        reviews: [],
-      });
-    }
-
-    // ==========================================
-    // 3. GET STUDENT PROFILES
-    // ==========================================
-
-    const { data: profiles, error: profileError } = await db
-      .from("profiles")
-      .select(
-        `
-                user_id,
-                name,
-                avatar_url,
-                squad_id,
-                leetcode
-            `,
-      )
-      .in("user_id", studentIds);
-
-    if (profileError) {
-      console.error("Review Queue Profile Error:", profileError);
-
-      return res.status(400).json({
-        error: profileError.message,
-      });
-    }
-
-    // ==========================================
-    // 4. GET LEETCODE LEADERBOARD DATA
-    // ==========================================
-
-    const { data: leaderboardData, error: leaderboardError } = await db
-      .from("leetcode_leaderboard")
-      .select(
-        `
-    id,
-    user_id,
-    leetcode_username,
-    submission_id,
-    title_slug,
-    difficulty,
-    submitted_at,
-    flag_reason,
-    review_status,
-    status
-`,
-      )
-      .in("user_id", studentIds);
-
-    if (leaderboardError) {
-      console.error("Review Queue Leaderboard Error:", leaderboardError);
-
-      return res.status(400).json({
-        error: leaderboardError.message,
-      });
-    }
-
-    // ==========================================
-    // 5. BUILD LOOKUP MAPS
-    // ==========================================
-
-    const profileMap = new Map();
-
-    (profiles || []).forEach((profile) => {
-      profileMap.set(String(profile.user_id), profile);
-    });
-
-    const leaderboardMap = new Map();
-
-    (leaderboardData || []).forEach((row) => {
-      leaderboardMap.set(String(row.user_id), row);
-    });
-
-    // ==========================================
-    // 6. BUILD MENTOR REVIEW CARDS
-    // ==========================================
-
-    const reviews = [];
-
-    for (const studentId of studentIds) {
-      const studentPendingSubmissions = pendingSubmissions.filter(
-        (submission) => String(submission.user_id) === String(studentId),
-      );
-
-      // Student has no pending submissions
-      if (studentPendingSubmissions.length === 0) {
-        continue;
-      }
-
-      const profile = profileMap.get(String(studentId)) || {};
-
-      const leaderboard = leaderboardMap.get(String(studentId)) || {};
-
-      reviews.push({
-        student_user_id: studentId,
-
-        name: profile.name || "Unknown Student",
-
-        avatar_url: profile.avatar_url || null,
-
-        squad_id: profile.squad_id || null,
-
-        leetcode_username:
-          leaderboard.leetcode_username ||
-          studentPendingSubmissions[0]?.leetcode_username ||
-          profile.leetcode ||
-          "unknown",
-
-        easy_solved: leaderboard.easy_solved || 0,
-
-        medium_solved: leaderboard.medium_solved || 0,
-
-        hard_solved: leaderboard.hard_solved || 0,
-
-        total_solved: leaderboard.total_solved || 0,
-
-        score: leaderboard.score || 0,
-
-        pending_review_count: studentPendingSubmissions.length,
-
-        pending_submissions: studentPendingSubmissions,
-      });
-    }
-
-    // ==========================================
-    // 7. RETURN REVIEW QUEUE
-    // ==========================================
-
-    return res.status(200).json({
-      success: true,
-      reviews,
-    });
-  } catch (error) {
-    console.error("Mentor Review Queue Error:", error);
-
-    return res.status(500).json({
-      error: "Internal server error",
-    });
-  }
-});
-
-// ==========================================
-// APPROVE MENTOR REVIEW
-// ==========================================
-
-router.patch(
-  "/leetcode-review/:studentUserId/approve",
+  return {
+    pendingCount: Number(pendingCount || 0),
+    rejectedCount: Number(rejectedCount || 0),
+    hasPendingReviews,
+    hasRejectedReviews,
+    isSuspended,
+    suspensionReason,
+  };
+};
+
+// ============================================================
+// GET MENTOR REVIEW QUEUE
+//
+// GET /leetcode-review/queue
+// ============================================================
+
+router.get(
+  "/leetcode-review/queue",
+  reviewLimiter,
   requireAuth,
   async (req, res) => {
     try {
-      const { studentUserId } = req.params;
-      const db = req.authedSupabase;
+      const mentorUserId = req.user.id;
 
-      // Make sure this student actually has pending reviews
-      const { data: pending, error: pendingError } = await db
+      // IMPORTANT:
+      // Use admin client so RLS does not hide submissions.
+      const db = req.adminSupabase;
+
+      console.log(
+        "================================================"
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Loading queue..."
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Mentor ID:",
+        mentorUserId
+      );
+
+      // ------------------------------------------------------
+      // STEP 1: GET MENTOR STUDENTS
+      // ------------------------------------------------------
+
+      const {
+        squadIds,
+        students: reviewStudents,
+      } = await getMentorReviewStudents(
+        db,
+        mentorUserId
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Mentor squads:",
+        squadIds
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Review students:",
+        reviewStudents
+      );
+
+      if (reviewStudents.length === 0) {
+        console.log(
+          "[MENTOR REVIEW] No assigned students."
+        );
+
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          reviews: [],
+        });
+      }
+
+      // ------------------------------------------------------
+      // STEP 2: STUDENT IDS
+      // ------------------------------------------------------
+
+      const studentIds =
+        reviewStudents
+          .map(
+            (student) =>
+              student.student_user_id
+          )
+          .filter(Boolean);
+
+      console.log(
+        "[MENTOR REVIEW] Student IDs:",
+        studentIds
+      );
+
+      if (studentIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          reviews: [],
+        });
+      }
+
+      // ------------------------------------------------------
+      // STEP 3: LOAD ALL SUBMISSIONS
+      // ------------------------------------------------------
+
+      console.log(
+        "[MENTOR REVIEW] STEP 3: Loading ALL submissions..."
+      );
+
+      const {
+        data: allSubmissions,
+        error: allSubmissionError,
+      } = await db
         .from("leetcode_submissions")
-        .select("id")
-        .eq("user_id", studentUserId)
-        .eq("review_status", "pending");
+        .select(`
+          id,
+          user_id,
+          submission_id,
+          title_slug,
+          difficulty,
+          submitted_at,
+          flag_reason,
+          review_status,
+          status,
+          created_at
+        `)
+        .in("user_id", studentIds)
+        .order("submitted_at", {
+          ascending: false,
+        });
 
-      if (pendingError) {
+      console.log(
+        "[MENTOR REVIEW] ALL submissions error:",
+        allSubmissionError
+      );
+
+      console.log(
+        "[MENTOR REVIEW] ALL submission count:",
+        allSubmissions?.length || 0
+      );
+
+      if (allSubmissionError) {
+        console.error(
+          "[MENTOR REVIEW] ALL submissions query failed:",
+          allSubmissionError
+        );
+      }
+
+      // ------------------------------------------------------
+      // STEP 4: LOAD PENDING SUBMISSIONS
+      // ------------------------------------------------------
+
+      console.log(
+        "[MENTOR REVIEW] STEP 4: Loading pending submissions..."
+      );
+
+      const {
+        data: pendingSubmissions,
+        error: submissionError,
+      } = await db
+        .from("leetcode_submissions")
+        .select(`
+          id,
+          user_id,
+          submission_id,
+          title_slug,
+          difficulty,
+          submitted_at,
+          flag_reason,
+          review_status,
+          status,
+          created_at
+        `)
+        .in("user_id", studentIds)
+        .eq("review_status", "pending")
+        .order("submitted_at", {
+          ascending: false,
+        });
+
+      console.log(
+        "[MENTOR REVIEW] Pending submissions error:",
+        submissionError
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Pending submissions:",
+        pendingSubmissions
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Pending submission count:",
+        pendingSubmissions?.length || 0
+      );
+
+      // ------------------------------------------------------
+      // HANDLE QUERY ERROR
+      // ------------------------------------------------------
+
+      if (submissionError) {
+        console.error(
+          "[MENTOR REVIEW] Pending query failed:",
+          submissionError
+        );
+
         return res.status(400).json({
-          error: pendingError.message,
+          success: false,
+          error: submissionError.message,
         });
       }
 
-      if (!pending || pending.length === 0) {
-        return res.status(404).json({
-          error: "No pending review found for this student",
+      // ------------------------------------------------------
+      // NO PENDING REVIEWS
+      // ------------------------------------------------------
+
+      if (
+        !pendingSubmissions ||
+        pendingSubmissions.length === 0
+      ) {
+        console.log(
+          "[MENTOR REVIEW] No pending submissions."
+        );
+
+        return res.status(200).json({
+          success: true,
+          count: 0,
+          reviews: [],
         });
       }
 
-      // Approve all pending submissions
-      const { data, error } = await db
+      // ------------------------------------------------------
+      // STEP 5: PENDING STUDENT IDS
+      // ------------------------------------------------------
+
+      const pendingStudentIds = [
+        ...new Set(
+          pendingSubmissions
+            .map(
+              (submission) =>
+                submission.user_id
+            )
+            .filter(Boolean)
+        ),
+      ];
+
+      console.log(
+        "[MENTOR REVIEW] Pending student IDs:",
+        pendingStudentIds
+      );
+
+      // ------------------------------------------------------
+      // STEP 6: GET PROFILES
+      // ------------------------------------------------------
+
+      const {
+        data: profiles,
+        error: profileError,
+      } = await db
+        .from("profiles")
+        .select(`
+          id,
+          user_id,
+          name,
+          avatar_url,
+          squad_id,
+          leetcode
+        `)
+        .in("user_id", pendingStudentIds);
+
+      if (profileError) {
+        console.error(
+          "[MENTOR REVIEW] Profile error:",
+          profileError
+        );
+
+        return res.status(400).json({
+          success: false,
+          error: profileError.message,
+        });
+      }
+
+      console.log(
+        "[MENTOR REVIEW] Profiles:",
+        profiles
+      );
+
+      // ------------------------------------------------------
+      // STEP 7: GET LEADERBOARD
+      // ------------------------------------------------------
+
+      const {
+        data: leaderboardData,
+        error: leaderboardError,
+      } = await db
+        .from("leetcode_leaderboard")
+        .select(`
+          id,
+          profile_id,
+          user_id,
+          leetcode_username,
+          easy_solved,
+          medium_solved,
+          hard_solved,
+          total_solved,
+          ranking,
+          score,
+          updated_at,
+          last_solved_at,
+          is_leetcode_active,
+          is_suspended,
+          suspension_reason
+        `)
+        .in("user_id", pendingStudentIds);
+
+      if (leaderboardError) {
+        console.error(
+          "[MENTOR REVIEW] Leaderboard error:",
+          leaderboardError
+        );
+
+        return res.status(400).json({
+          success: false,
+          error: leaderboardError.message,
+        });
+      }
+
+      console.log(
+        "[MENTOR REVIEW] Leaderboard rows:",
+        leaderboardData
+      );
+
+      // ------------------------------------------------------
+      // STEP 8: CREATE MAPS
+      // ------------------------------------------------------
+
+      const profileMap = new Map();
+
+      for (const profile of profiles || []) {
+        if (profile.user_id) {
+          profileMap.set(
+            String(profile.user_id),
+            profile
+          );
+        }
+      }
+
+      const leaderboardMap = new Map();
+
+      for (
+        const row of leaderboardData || []
+      ) {
+        if (row.user_id) {
+          leaderboardMap.set(
+            String(row.user_id),
+            row
+          );
+        }
+      }
+
+      const assignmentMap = new Map();
+
+      for (
+        const student of reviewStudents
+      ) {
+        assignmentMap.set(
+          String(
+            student.student_user_id
+          ),
+          student
+        );
+      }
+
+      // ------------------------------------------------------
+      // STEP 9: GROUP PENDING SUBMISSIONS
+      // ------------------------------------------------------
+
+      const pendingMap = new Map();
+
+      for (
+        const submission of pendingSubmissions
+      ) {
+        const studentId =
+          String(submission.user_id);
+
+        if (!pendingMap.has(studentId)) {
+          pendingMap.set(
+            studentId,
+            []
+          );
+        }
+
+        pendingMap
+          .get(studentId)
+          .push({
+            id: submission.id,
+
+            submission_id:
+              submission.submission_id,
+
+            title_slug:
+              submission.title_slug,
+
+            difficulty:
+              submission.difficulty,
+
+            submitted_at:
+              submission.submitted_at,
+
+            created_at:
+              submission.created_at,
+
+            flag_reason:
+              submission.flag_reason,
+
+            review_status:
+              submission.review_status,
+
+            status:
+              submission.status,
+          });
+      }
+
+      // ------------------------------------------------------
+      // STEP 10: BUILD REVIEW CARDS
+      // ------------------------------------------------------
+
+      const reviews = [];
+
+      for (
+        const studentId of pendingStudentIds
+      ) {
+        const key = String(studentId);
+
+        const submissions =
+          pendingMap.get(key) || [];
+
+        if (submissions.length === 0) {
+          continue;
+        }
+
+        const profile =
+          profileMap.get(key) || {};
+
+        const leaderboard =
+          leaderboardMap.get(key) || {};
+
+        const assignment =
+          assignmentMap.get(key) || {};
+
+        reviews.push({
+          student_user_id:
+            studentId,
+
+          name:
+            profile.name ||
+            "Unknown Student",
+
+          avatar_url:
+            profile.avatar_url ||
+            null,
+
+          squad_id:
+            assignment.squad_id ??
+            profile.squad_id ??
+            null,
+
+          assigned_at:
+            assignment.assigned_at ??
+            null,
+
+          leetcode_username:
+            leaderboard.leetcode_username ||
+            profile.leetcode ||
+            "unknown",
+
+          easy_solved:
+            Number(
+              leaderboard.easy_solved
+            ) || 0,
+
+          medium_solved:
+            Number(
+              leaderboard.medium_solved
+            ) || 0,
+
+          hard_solved:
+            Number(
+              leaderboard.hard_solved
+            ) || 0,
+
+          total_solved:
+            Number(
+              leaderboard.total_solved
+            ) || 0,
+
+          ranking:
+            leaderboard.ranking !== null &&
+            leaderboard.ranking !== undefined
+              ? Number(
+                  leaderboard.ranking
+                )
+              : null,
+
+          score:
+            Number(
+              leaderboard.score
+            ) || 0,
+
+          is_suspended:
+            Boolean(
+              leaderboard.is_suspended
+            ),
+
+          suspension_reason:
+            leaderboard.suspension_reason ||
+            null,
+
+          pending_review_count:
+            submissions.length,
+
+          pending_submissions:
+            submissions,
+        });
+      }
+
+      // ------------------------------------------------------
+      // SORT
+      // ------------------------------------------------------
+
+      reviews.sort(
+        (a, b) =>
+          b.pending_review_count -
+          a.pending_review_count
+      );
+
+      console.log(
+        "[MENTOR REVIEW] Review cards created:",
+        reviews.length
+      );
+
+      console.log(
+        "================================================"
+      );
+
+      return res.status(200).json({
+        success: true,
+        count: reviews.length,
+        reviews,
+      });
+    } catch (error) {
+      console.error(
+        "[MENTOR REVIEW] Queue error:",
+        error
+      );
+
+      return res.status(500).json({
+        success: false,
+        error:
+          error.message ||
+          "Internal server error",
+      });
+    }
+  }
+);
+
+// ============================================================
+// APPROVE MENTOR REVIEW
+//
+// PATCH /leetcode-review/:studentUserId/approve
+// ============================================================
+
+router.patch(
+  "/leetcode-review/:studentUserId/approve",
+  reviewLimiter,
+  requireAuth,
+  async (req, res) => {
+    try {
+      const {
+        studentUserId,
+      } = req.params;
+
+      const mentorUserId =
+        req.user.id;
+
+      const db =
+        req.adminSupabase;
+
+      console.log(
+        "[MENTOR REVIEW] Approving:",
+        {
+          mentorUserId,
+          studentUserId,
+        }
+      );
+
+      // ------------------------------------------------------
+      // VERIFY MENTOR ACCESS
+      // ------------------------------------------------------
+
+      const assignment =
+        await verifyMentorCanReviewStudent(
+          db,
+          mentorUserId,
+          studentUserId
+        );
+
+      if (!assignment) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "You are not authorized to review this student",
+        });
+      }
+
+      // ------------------------------------------------------
+      // APPROVE ALL PENDING SUBMISSIONS
+      // ------------------------------------------------------
+
+      const {
+        data: updated,
+        error: updateError,
+      } = await db
         .from("leetcode_submissions")
         .update({
           review_status: "approved",
@@ -723,97 +1030,130 @@ router.patch(
         .eq("review_status", "pending")
         .select();
 
-      if (error) {
-        console.error("Approve Review Error:", error);
+      if (updateError) {
+        console.error(
+          "[MENTOR REVIEW] Approve update error:",
+          updateError
+        );
 
         return res.status(400).json({
-          error: error.message,
+          success: false,
+          error: updateError.message,
         });
       }
 
-      // Get the student profile to update leaderboard suspension status
-      const { data: profile, error: profileError } = await db
-        .from("profiles")
-        .select("id")
-        .eq("user_id", studentUserId)
-        .single();
-
-      if (!profileError && profile) {
-        // Check if there are still any pending submissions
-        const { data: stillPending } = await db
-          .from("leetcode_submissions")
-          .select("id")
-          .eq("user_id", studentUserId)
-          .eq("review_status", "pending")
-          .limit(1);
-
-        const hasPendingReviews = stillPending && stillPending.length > 0;
-
-        // Update leaderboard suspension status
-        await db
-          .from("leetcode_leaderboard")
-          .update({
-            is_suspended: hasPendingReviews,
-            suspension_reason: hasPendingReviews
-              ? "Pending mentor review for suspicious submission patterns"
-              : null,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("profile_id", profile.id);
-
-        console.log(
-          `[APPROVAL] User ${studentUserId} | Suspension lifted - ready for leaderboard`,
-        );
+      if (
+        !updated ||
+        updated.length === 0
+      ) {
+        return res.status(404).json({
+          success: false,
+          error:
+            "No pending reviews found",
+        });
       }
+
+      // ------------------------------------------------------
+      // UPDATE LEADERBOARD STATUS
+      // ------------------------------------------------------
+
+      const reviewStatus =
+        await updateStudentReviewStatus(
+          db,
+          studentUserId
+        );
 
       return res.status(200).json({
         success: true,
-        message: "Review approved successfully",
-        updated: data,
+
+        message:
+          "Review approved successfully",
+
+        student_user_id:
+          studentUserId,
+
+        approved_count:
+          updated.length,
+
+        remaining_pending:
+          reviewStatus.hasPendingReviews,
+
+        is_suspended:
+          reviewStatus.isSuspended,
       });
     } catch (error) {
-      console.error("Approve Review Server Error:", error);
+      console.error(
+        "[MENTOR REVIEW] Approve error:",
+        error
+      );
 
       return res.status(500).json({
-        error: "Internal server error",
+        success: false,
+        error:
+          error.message ||
+          "Internal server error",
       });
     }
-  },
+  }
 );
 
-// ==========================================
+// ============================================================
 // REJECT MENTOR REVIEW
-// ==========================================
+//
+// PATCH /leetcode-review/:studentUserId/reject
+// ============================================================
 
 router.patch(
   "/leetcode-review/:studentUserId/reject",
+  reviewLimiter,
   requireAuth,
   async (req, res) => {
     try {
-      const { studentUserId } = req.params;
-      const db = req.authedSupabase;
+      const {
+        studentUserId,
+      } = req.params;
 
-      // Find pending submissions
-      const { data: pending, error: pendingError } = await db
-        .from("leetcode_submissions")
-        .select("id")
-        .eq("user_id", studentUserId)
-        .eq("review_status", "pending");
+      const mentorUserId =
+        req.user.id;
 
-      if (pendingError) {
-        return res.status(400).json({
-          error: pendingError.message,
+      const db =
+        req.adminSupabase;
+
+      console.log(
+        "[MENTOR REVIEW] Rejecting:",
+        {
+          mentorUserId,
+          studentUserId,
+        }
+      );
+
+      // ------------------------------------------------------
+      // VERIFY MENTOR ACCESS
+      // ------------------------------------------------------
+
+      const assignment =
+        await verifyMentorCanReviewStudent(
+          db,
+          mentorUserId,
+          studentUserId
+        );
+
+      if (!assignment) {
+        return res.status(403).json({
+          success: false,
+          error:
+            "You are not authorized to review this student",
         });
       }
 
-      if (!pending || pending.length === 0) {
-        return res.status(404).json({
-          error: "No pending review found for this student",
-        });
-      }
+      // ------------------------------------------------------
+      // REJECT ALL PENDING SUBMISSIONS
+      // ------------------------------------------------------
 
-      // Reject suspicious submissions
-      const { data, error } = await db
+      const {
+        data: updated,
+        error: updateError,
+      } = await db
         .from("leetcode_submissions")
         .update({
           review_status: "rejected",
@@ -823,51 +1163,75 @@ router.patch(
         .eq("review_status", "pending")
         .select();
 
-      if (error) {
-        console.error("Reject Review Error:", error);
+      if (updateError) {
+        console.error(
+          "[MENTOR REVIEW] Reject update error:",
+          updateError
+        );
 
         return res.status(400).json({
-          error: error.message,
+          success: false,
+          error: updateError.message,
         });
       }
 
-      // Keep student suspended as they were caught cheating
-      const { data: profile, error: profileError } = await db
-        .from("profiles")
-        .select("id")
-        .eq("user_id", studentUserId)
-        .single();
-
-      if (!profileError && profile) {
-        await db
-          .from("leetcode_leaderboard")
-          .update({
-            is_suspended: true,
-            suspension_reason:
-              "Rejected for suspicious submission patterns - Academic integrity violation",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("profile_id", profile.id);
-
-        console.log(
-          `[REJECTION] User ${studentUserId} | Permanently suspended for academic integrity violation`,
-        );
+      if (
+        !updated ||
+        updated.length === 0
+      ) {
+        return res.status(404).json({
+          success: false,
+          error:
+            "No pending reviews found",
+        });
       }
+
+      // ------------------------------------------------------
+      // UPDATE LEADERBOARD STATUS
+      // ------------------------------------------------------
+
+      const reviewStatus =
+        await updateStudentReviewStatus(
+          db,
+          studentUserId
+        );
 
       return res.status(200).json({
         success: true,
+
         message:
-          "Suspicious submissions rejected - Student suspended from leaderboard",
-        updated: data,
+          "Review rejected successfully",
+
+        student_user_id:
+          studentUserId,
+
+        rejected_count:
+          updated.length,
+
+        is_suspended:
+          reviewStatus.isSuspended,
+
+        suspension_reason:
+          reviewStatus.suspensionReason,
       });
     } catch (error) {
-      console.error("Reject Review Server Error:", error);
+      console.error(
+        "[MENTOR REVIEW] Reject error:",
+        error
+      );
 
       return res.status(500).json({
-        error: "Internal server error",
+        success: false,
+        error:
+          error.message ||
+          "Internal server error",
       });
     }
-  },
+  }
 );
+
+// ============================================================
+// DEFAULT EXPORT
+// ============================================================
 
 export default router;

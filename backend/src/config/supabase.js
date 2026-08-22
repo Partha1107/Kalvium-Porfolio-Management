@@ -4,38 +4,76 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_ANON_KEY;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("Missing required Supabase environment variables (URL, ANON_KEY).");
+if (!supabaseUrl) {
+  throw new Error(
+    "Missing SUPABASE_URL environment variable."
+  );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseKey);
-
-export function createAuthedSupabaseClient(token) {
-  return createClient(supabaseUrl, supabaseKey, {
-    global: {
-      headers: {
-        Authorization: `Bearer ${token}`
-      }
-    },
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  });
+if (!supabaseAnonKey) {
+  throw new Error(
+    "Missing SUPABASE_ANON_KEY environment variable."
+  );
 }
+
+// ============================================================
+// NORMAL SUPABASE CLIENT
+// ============================================================
+
+export const supabase = createClient(
+  supabaseUrl,
+  supabaseAnonKey
+);
+
+// ============================================================
+// ADMIN / SERVER CLIENT
+// ============================================================
 
 if (!supabaseServiceKey) {
-  console.warn("Supabase service key missing - it is optional as it is only required for cron job only at the moment.");
+  console.warn(
+    "[SUPABASE] SUPABASE_SERVICE_KEY is missing. Admin operations will not work."
+  );
 }
 
-export const supabaseAdmin = supabaseServiceKey 
-  ? createClient(supabaseUrl, supabaseServiceKey, {
-      auth: {
-        autoRefreshToken: false,
-        persistSession: false
+export const supabaseAdmin = supabaseServiceKey
+  ? createClient(
+      supabaseUrl,
+      supabaseServiceKey,
+      {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
       }
-    })
+    )
   : null;
+
+// ============================================================
+// AUTHENTICATED USER CLIENT
+// ============================================================
+
+export const createAuthedSupabaseClient = (
+  accessToken
+) => {
+  if (!accessToken) {
+    throw new Error(
+      "Access token is required"
+    );
+  }
+
+  return createClient(
+    supabaseUrl,
+    supabaseAnonKey,
+    {
+      global: {
+        headers: {
+          Authorization:
+            `Bearer ${accessToken}`,
+        },
+      },
+    }
+  );
+};

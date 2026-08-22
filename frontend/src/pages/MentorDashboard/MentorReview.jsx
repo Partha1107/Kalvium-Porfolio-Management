@@ -1,242 +1,525 @@
-import React, { useEffect, useState } from "react";
-import { Clock, CheckCircle, AlertTriangle } from "lucide-react";
+import React, {
+  useEffect,
+  useState,
+} from "react";
+
 import {
-    getMentorReviewQueue,
-    approveMentorReview,
-    rejectMentorReview,
+  Clock,
+  CheckCircle,
+  AlertTriangle,
+} from "lucide-react";
+
+import {
+  getMentorReviewQueue,
+  approveMentorReview,
+  rejectMentorReview,
 } from "../../api/routes/Mentor/review";
+
 import "./MentorReview.css";
 
 const MentorReview = () => {
-    const [reviews, setReviews] = useState([]);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState("");
+  const [reviews, setReviews] =
+    useState([]);
 
-    useEffect(() => {
-        const loadReviews = async () => {
-            try {
-                setLoading(true);
+  const [loading, setLoading] =
+    useState(true);
 
-                const data = await getMentorReviewQueue();
+  const [error, setError] =
+    useState("");
 
-                setReviews(data.reviews || []);
-            } catch (err) {
-                console.error(err);
-                setError(err.message);
-            } finally {
-                setLoading(false);
-            }
-        };
+  const [processingStudentId, setProcessingStudentId] =
+    useState(null);
 
-        loadReviews();
-    }, []);
+  // ============================================================
+  // LOAD REVIEW QUEUE
+  // ============================================================
 
+  const loadReviews = async () => {
+    try {
+      setLoading(true);
+      setError("");
 
-    const handleApprove = async (student) => {
-        try {
-            await approveMentorReview(student.student_user_id);
+      const data =
+        await getMentorReviewQueue();
 
-            // Remove the student from the pending queue
-            setReviews((prev) =>
-                prev.filter(
-                    (item) =>
-                        item.student_user_id !== student.student_user_id
-                )
-            );
-        } catch (err) {
-            console.error("Approve error:", err);
-            setError(err.message || "Failed to approve review");
-        }
-    };
+      console.log(
+        "[MENTOR REVIEW QUEUE]",
+        data
+      );
 
-    const handleReject = async (student) => {
-        try {
-            await rejectMentorReview(student.student_user_id);
+      setReviews(
+        Array.isArray(
+          data?.reviews
+        )
+          ? data.reviews
+          : []
+      );
+    } catch (err) {
+      console.error(
+        "[MENTOR REVIEW LOAD ERROR]",
+        err
+      );
 
-            // Remove the student from the pending queue
-            setReviews((prev) =>
-                prev.filter(
-                    (item) =>
-                        item.student_user_id !== student.student_user_id
-                )
-            );
-        } catch (err) {
-            console.error("Reject error:", err);
-            setError(err.message || "Failed to reject review");
-        }
-    };
+      const message =
+        err?.response?.data?.error ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to load mentor review queue";
 
-    if (loading) {
-        return (
-            <div className="mentor-review-page">
-                <h1>Mentor Review</h1>
-                <p>Loading review queue...</p>
-            </div>
-        );
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadReviews();
+  }, []);
+
+  // ============================================================
+  // APPROVE
+  // ============================================================
+
+  const handleApprove = async (
+    student
+  ) => {
+    if (
+      !student?.student_user_id
+    ) {
+      setError(
+        "Student user ID is missing"
+      );
+
+      return;
     }
 
+    try {
+      setError("");
+
+      setProcessingStudentId(
+        student.student_user_id
+      );
+
+      await approveMentorReview(
+        student.student_user_id
+      );
+
+      setReviews((prev) =>
+        prev.filter(
+          (item) =>
+            String(
+              item.student_user_id
+            ) !==
+            String(
+              student.student_user_id
+            )
+        )
+      );
+    } catch (err) {
+      console.error(
+        "[APPROVE ERROR]",
+        err
+      );
+
+      const message =
+        err?.response?.data?.error ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to approve review";
+
+      setError(message);
+    } finally {
+      setProcessingStudentId(
+        null
+      );
+    }
+  };
+
+  // ============================================================
+  // REJECT
+  // ============================================================
+
+  const handleReject = async (
+    student
+  ) => {
+    if (
+      !student?.student_user_id
+    ) {
+      setError(
+        "Student user ID is missing"
+      );
+
+      return;
+    }
+
+    try {
+      setError("");
+
+      setProcessingStudentId(
+        student.student_user_id
+      );
+
+      await rejectMentorReview(
+        student.student_user_id
+      );
+
+      setReviews((prev) =>
+        prev.filter(
+          (item) =>
+            String(
+              item.student_user_id
+            ) !==
+            String(
+              student.student_user_id
+            )
+        )
+      );
+    } catch (err) {
+      console.error(
+        "[REJECT ERROR]",
+        err
+      );
+
+      const message =
+        err?.response?.data?.error ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to reject review";
+
+      setError(message);
+    } finally {
+      setProcessingStudentId(
+        null
+      );
+    }
+  };
+
+  // ============================================================
+  // LOADING
+  // ============================================================
+
+  if (loading) {
     return (
-        <div className="mentor-review-page">
+      <div className="mentor-review-page">
+        <h1>
+          Mentor Review
+        </h1>
 
-            <div className="review-header">
-                <div>
-                    <h1>Mentor Review</h1>
+        <p>
+          Loading review queue...
+        </p>
+      </div>
+    );
+  }
 
-                    <p>
-                        Review suspicious rapid LeetCode solves
-                        before awarding leaderboard points.
-                    </p>
-                </div>
+  // ============================================================
+  // UI
+  // ============================================================
 
-                <div className="review-count">
-                    <Clock size={18} />
-                    {reviews.length} Pending
-                </div>
-            </div>
+  return (
+    <div className="mentor-review-page">
 
-            {error && (
-                <div className="review-error">
-                    <AlertTriangle size={18} />
-                    {error}
-                </div>
-            )}
+      {/* HEADER */}
 
-            {reviews.length === 0 ? (
-                <div className="empty-review">
-                    <CheckCircle size={45} />
+      <div className="review-header">
 
-                    <h2>No reviews pending</h2>
+        <div>
+          <h1>
+            Mentor Review
+          </h1>
 
-                    <p>
-                        All assigned students are currently clear.
-                    </p>
-                </div>
-            ) : (
-                <div className="review-list">
+          <p>
+            Review suspicious rapid
+            LeetCode solves before
+            awarding leaderboard
+            points.
+          </p>
+        </div>
 
-                    {reviews.map((student) => (
-                        <div
-                            className="review-card"
-                            key={student.student_user_id}
-                        >
+        <div className="review-count">
 
-                            <div className="review-student">
+          <Clock size={18} />
 
-                                <div className="review-avatar">
-                                    {student.name
-                                        ? student.name.charAt(0).toUpperCase()
-                                        : "S"}
-                                </div>
-
-                                <div>
-                                    <h3>
-                                        {student.name || "Student"}
-                                    </h3>
-
-                                    <p>
-                                        @{student.leetcode_username || "unknown"}
-                                    </p>
-
-                                    <span>
-                                        {student.squad_id
-                                            ? `Squad ${student.squad_id}`
-                                            : `Student ID: ${student.student_user_id}`}
-                                    </span>
-                                </div>
-
-                            </div>
-
-                            <div className="review-warning">
-                                <AlertTriangle size={18} />
-
-                                <div>
-                                    <strong>
-                                        Mentor verification required
-                                    </strong>
-
-                                    <p>
-                                        {student.pending_review_count} submission(s)
-                                        require mentor verification.
-                                    </p>
-
-                                    {student.pending_submissions?.map(
-                                        (submission) => (
-                                            <div
-                                                key={submission.submission_id}
-                                                className="review-reason"
-                                            >
-                                                <strong>
-                                                    {submission.title_slug}
-                                                </strong>
-
-                                                <span>
-                                                    {submission.flag_reason}
-                                                </span>
-                                            </div>
-                                        )
-                                    )}
-                                </div>
-                            </div>
-
-                            <div className="review-stats">
-
-                                <div>
-                                    <strong>
-                                        {student.easy_solved}
-                                    </strong>
-                                    <span>Easy</span>
-                                </div>
-
-                                <div>
-                                    <strong>
-                                        {student.medium_solved}
-                                    </strong>
-                                    <span>Medium</span>
-                                </div>
-
-                                <div>
-                                    <strong>
-                                        {student.hard_solved}
-                                    </strong>
-                                    <span>Hard</span>
-                                </div>
-
-                                <div>
-                                    <strong>
-                                        {student.score}
-                                    </strong>
-                                    <span>Points</span>
-                                </div>
-
-                            </div>
-
-                            <div className="review-actions">
-
-                                <button
-                                    className="review-btn approve"
-                                    onClick={() => handleApprove(student)}
-                                >
-                                    <CheckCircle size={16} />
-                                    Approve
-                                </button>
-
-                                <button
-                                    className="review-btn reject"
-                                    onClick={() => handleReject(student)}
-                                >
-                                    Reject
-                                </button>
-
-                            </div>
-
-                        </div>
-                    ))}
-
-                </div>
-            )}
+          {reviews.length} Pending
 
         </div>
-    );
+
+      </div>
+
+      {/* ERROR */}
+
+      {error && (
+        <div className="review-error">
+
+          <AlertTriangle size={18} />
+
+          <span>
+            {error}
+          </span>
+
+        </div>
+      )}
+
+      {/* EMPTY */}
+
+      {reviews.length === 0 ? (
+        <div className="empty-review">
+
+          <CheckCircle size={45} />
+
+          <h2>
+            No reviews pending
+          </h2>
+
+          <p>
+            All assigned students
+            are currently clear.
+          </p>
+
+        </div>
+      ) : (
+
+        <div className="review-list">
+
+          {reviews.map(
+            (student) => {
+
+              // IMPORTANT:
+              // Backend returns pending_submissions
+
+              const submissions =
+                Array.isArray(
+                  student.pending_submissions
+                )
+                  ? student.pending_submissions
+                  : [];
+
+              const isProcessing =
+                String(
+                  processingStudentId
+                ) ===
+                String(
+                  student.student_user_id
+                );
+
+              return (
+                <div
+                  className="review-card"
+                  key={
+                    student.student_user_id
+                  }
+                >
+
+                  {/* STUDENT */}
+
+                  <div className="review-student">
+
+                    <div className="review-avatar">
+
+                      {student.name
+                        ? student.name
+                            .charAt(0)
+                            .toUpperCase()
+                        : "S"}
+
+                    </div>
+
+                    <div>
+
+                      <h3>
+                        {student.name ||
+                          "Student"}
+                      </h3>
+
+                      <p>
+                        @
+                        {student.leetcode_username ||
+                          "unknown"}
+                      </p>
+
+                      <span>
+                        {student.squad_id
+                          ? `Squad ${student.squad_id}`
+                          : `Student ID: ${student.student_user_id}`}
+                      </span>
+
+                    </div>
+
+                  </div>
+
+                  {/* WARNING */}
+
+                  <div className="review-warning">
+
+                    <AlertTriangle size={18} />
+
+                    <div>
+
+                      <strong>
+                        Mentor verification required
+                      </strong>
+
+                      <p>
+                        {
+                          student.pending_review_count ??
+                          submissions.length
+                        }{" "}
+                        submission(s)
+                        require mentor
+                        verification.
+                      </p>
+
+                      {/* SUBMISSIONS */}
+
+                      {submissions.map(
+                        (submission) => (
+                          <div
+                            key={
+                              submission.id ||
+                              submission.submission_id
+                            }
+                            className="review-reason"
+                          >
+
+                            <strong>
+                              {submission.title_slug ||
+                                "Unknown problem"}
+                            </strong>
+
+                            <span>
+                              {submission.flag_reason ||
+                                "Suspicious submission pattern detected"}
+                            </span>
+
+                            {submission.difficulty && (
+                              <small>
+                                Difficulty:{" "}
+                                {
+                                  submission.difficulty
+                                }
+                              </small>
+                            )}
+
+                            {submission.submitted_at && (
+                              <small>
+                                {new Date(
+                                  submission.submitted_at
+                                ).toLocaleString()}
+                              </small>
+                            )}
+
+                          </div>
+                        )
+                      )}
+
+                    </div>
+
+                  </div>
+
+                  {/* STATS */}
+
+                  <div className="review-stats">
+
+                    <div>
+                      <strong>
+                        {student.easy_solved ??
+                          0}
+                      </strong>
+
+                      <span>
+                        Easy
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong>
+                        {student.medium_solved ??
+                          0}
+                      </strong>
+
+                      <span>
+                        Medium
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong>
+                        {student.hard_solved ??
+                          0}
+                      </strong>
+
+                      <span>
+                        Hard
+                      </span>
+                    </div>
+
+                    <div>
+                      <strong>
+                        {student.score ??
+                          0}
+                      </strong>
+
+                      <span>
+                        Points
+                      </span>
+                    </div>
+
+                  </div>
+
+                  {/* ACTIONS */}
+
+                  <div className="review-actions">
+
+                    <button
+                      type="button"
+                      className="review-btn approve"
+                      disabled={
+                        isProcessing
+                      }
+                      onClick={() =>
+                        handleApprove(
+                          student
+                        )
+                      }
+                    >
+
+                      <CheckCircle
+                        size={16}
+                      />
+
+                      {isProcessing
+                        ? "Processing..."
+                        : "Approve"}
+
+                    </button>
+
+                    <button
+                      type="button"
+                      className="review-btn reject"
+                      disabled={
+                        isProcessing
+                      }
+                      onClick={() =>
+                        handleReject(
+                          student
+                        )
+                      }
+                    >
+                      Reject
+                    </button>
+
+                  </div>
+
+                </div>
+              );
+            }
+          )}
+
+        </div>
+      )}
+
+    </div>
+  );
 };
 
 export default MentorReview;
