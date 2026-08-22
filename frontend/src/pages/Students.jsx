@@ -54,54 +54,41 @@ export default function Students() {
 
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSquad, setSelectedSquad] = useState("all");
-  const [sortBy, setSortBy] = useState("az");
-
+  const [sortOrder, setSortOrder] = useState("asc");
   const itemsPerPage = 12;
 
-  // Filter students
-  const filteredStudents = studentsData
-    .filter((student) => {
-      const query = searchQuery.toLowerCase().trim();
+  const availableSquads = Array.from(
+    new Set(studentsData.map((student) => student.squad_id).filter(Boolean))
+  ).sort((firstSquad, secondSquad) => Number(firstSquad) - Number(secondSquad));
 
-      const matchesSearch =
-        !query ||
-        (student.name || "").toLowerCase().includes(query) ||
-        (student.role || "").toLowerCase().includes(query) ||
-        (student.skills || []).some((skill) =>
-          skill.toLowerCase().includes(query)
-        );
+  const filteredStudents = studentsData.filter((student) => {
+    const query = searchQuery.toLowerCase();
+    const matchesSquad =
+      selectedSquad === "all" || String(student.squad_id) === selectedSquad;
 
-      const matchesSquad =
-        selectedSquad === "all" ||
-        String(student.squad_id) === selectedSquad;
+    return matchesSquad && (
+      student.name.toLowerCase().includes(query) ||
+      student.role.toLowerCase().includes(query) ||
+      (student.skills || []).some((skill) =>
+        skill.toLowerCase().includes(query)
+      )
+    );
+  });
 
-      return matchesSearch && matchesSquad;
-    })
-    .sort((a, b) => {
-      if (sortBy === "az") {
-        return (a.name || "").localeCompare(b.name || "");
-      }
-
-      if (sortBy === "za") {
-        return (b.name || "").localeCompare(a.name || "");
-      }
-
-      return 0;
+  const sortedStudents = [...filteredStudents].sort((firstStudent, secondStudent) => {
+    const nameComparison = firstStudent.name.localeCompare(secondStudent.name, undefined, {
+      sensitivity: "base",
     });
 
-  const totalItems = filteredStudents.length;
-  const totalPages = Math.max(
-    1,
-    Math.ceil(totalItems / itemsPerPage)
-  );
+    return sortOrder === "asc" ? nameComparison : -nameComparison;
+  });
+
+  const totalItems = sortedStudents.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / itemsPerPage));
 
   const startIndex = (currentPage - 1) * itemsPerPage;
   const endIndex = Math.min(startIndex + itemsPerPage, totalItems);
-
-  const currentStudents = filteredStudents.slice(
-    startIndex,
-    endIndex
-  );
+  const currentStudents = sortedStudents.slice(startIndex, endIndex);
 
   const itemsToRenderCount = isLoading
     ? itemsPerPage
@@ -136,8 +123,8 @@ export default function Students() {
             student.avatar_url && student.avatar_url.trim() !== ""
               ? student.avatar_url
               : `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                  student.name || "Student"
-                )}&background=0D8ABC&color=fff&size=256`,
+                student.name || "Student"
+              )}&background=0D8ABC&color=fff&size=256`,
 
           skills: [
             student.github ? "GitHub" : null,
@@ -170,7 +157,7 @@ export default function Students() {
   // Reset pagination when filters change
   useEffect(() => {
     setCurrentPage(1);
-  }, [searchQuery, selectedSquad, sortBy]);
+  }, [searchQuery, selectedSquad, sortOrder]);
 
   const handlePageChange = (page) => {
     if (page >= 1 && page <= totalPages && page !== currentPage) {
@@ -291,23 +278,25 @@ export default function Students() {
           </div>
 
           <div className="filters-row">
-            {/* Squad Filter */}
             <select
               value={selectedSquad}
-              onChange={(e) => setSelectedSquad(e.target.value)}
+              onChange={(event) => setSelectedSquad(event.target.value)}
+              aria-label="Filter students by squad ID"
             >
               <option value="all">All Squads</option>
-              <option value="138">Squad 138</option>
-              <option value="139">Squad 139</option>
+              {availableSquads.map((squadId) => (
+                <option key={squadId} value={String(squadId)}>
+                  Squad {squadId}
+                </option>
+              ))}
             </select>
-
-            {/* Sorting */}
             <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
+              value={sortOrder}
+              onChange={(event) => setSortOrder(event.target.value)}
+              aria-label="Sort students by name"
             >
-              <option value="az">Sort by: A → Z</option>
-              <option value="za">Sort by: Z → A</option>
+              <option value="asc">Sort by: A → Z</option>
+              <option value="desc">Sort by: Z → A</option>
             </select>
           </div>
         </div>
