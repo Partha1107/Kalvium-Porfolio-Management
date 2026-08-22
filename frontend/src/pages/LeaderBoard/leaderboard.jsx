@@ -339,7 +339,7 @@ function Leaderboard() {
         <p>
           Rapid or suspicious consecutive solves are automatically 
           flagged by AI and held in the
-          <strong>Mentor Evaluation Queue</strong> before
+          <strong> Mentor Evaluation Queue</strong> before
           point allocation.
         </p>
 
